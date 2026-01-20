@@ -1,0 +1,376 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                ║
+║                    FLUJO VISUAL - ANKI SYNC INTEGRATION                        ║
+║                                                                                ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+
+1. INTERFAZ PRINCIPAL
+═══════════════════════════════════════════════════════════════════════════════
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │  Flashcards automáticas                                            [_][□][X]│
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  ┌─ Select Input Method ──────────────────────────────────────────────┐ │
+    │  │                                                                    │ │
+    │  │  [PDF with Annotations] [PDF Full Text] [Direct Text] [Anki Sync]│ │
+    │  │                                                                    │ │
+    │  │  • Sync up to 4 decks with different flashcard types             │ │
+    │  │                                                                    │ │
+    │  └────────────────────────────────────────────────────────────────────┘ │
+    │                                                                         │
+    │  ┌─ Anki Status ──────────────────────────────────────────────────────┐ │
+    │  │  ● Anki is running                                               │ │
+    │  │  [Check Status] [Start Anki]                                     │ │
+    │  └────────────────────────────────────────────────────────────────────┘ │
+    │                                                                         │
+    │  ┌─ Anki Decks (up to 4) ─────────────────────────────────────────────┐ │
+    │  │                                                                    │ │
+    │  │  Deck 1: [Mi Primer Mazo    ] [basic        ] [Load Flashcards] │ │
+    │  │  Deck 2: [Preguntas         ] [multiple_ch..] [Load Flashcards] │ │
+    │  │  Deck 3: [Cloze             ] [cloze        ] [Load Flashcards] │ │
+    │  │  Deck 4: [Vocabulary        ] [vocabulary   ] [Load Flashcards] │ │
+    │  │                                                                    │ │
+    │  └────────────────────────────────────────────────────────────────────┘ │
+    │                                                                         │
+    │  ┌─ Flashcards Preview ───────────────────────────────────────────────┐ │
+    │  │  Preview Deck: [1 ▼]                                             │ │
+    │  │  ┌──────────────────────────────────────────────────────────────┐ │ │
+    │  │  │ Deck 1 - Type: basic                                        │ │ │
+    │  │  │ Total cards: 3                                              │ │ │
+    │  │  │                                                              │ │ │
+    │  │  │ Card 1:                                                     │ │ │
+    │  │  │ Front: ¿Qué es la Penalización de Gradiente?               │ │ │
+    │  │  │ Back: Es un término de regularización...                   │ │ │
+    │  │  │                                                              │ │ │
+    │  │  │ ... and 2 more cards                                        │ │ │
+    │  │  └──────────────────────────────────────────────────────────────┘ │ │
+    │  └────────────────────────────────────────────────────────────────────┘ │
+    │                                                                         │
+    │  ┌─ Synchronization ──────────────────────────────────────────────────┐ │
+    │  │  [Sync to Anki] [Clear All]                                     │ │
+    │  │  ████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │ │
+    │  │  Successfully synced 10 cards!                                  │ │
+    │  └────────────────────────────────────────────────────────────────────┘ │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+
+2. FLUJO DE SINCRONIZACIÓN
+═══════════════════════════════════════════════════════════════════════════════
+
+    Usuario Selecciona "Anki Sync"
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ Interfaz de Sincronización se Abre      │
+    └─────────────────────────────────────────┘
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ Verificar Estado de Anki                │
+    │ ¿Anki está ejecutándose?                │
+    └─────────────────────────────────────────┘
+            ↓
+        ┌───┴───┐
+        │       │
+       SÍ      NO
+        │       │
+        │   ┌───────────────────────────────┐
+        │   │ Iniciar Anki Automáticamente  │
+        │   │ (Esperar hasta 30 segundos)   │
+        │   └───────────────────────────────┘
+        │       │
+        └───┬───┘
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ Configurar Mazos (hasta 4)              │
+    │ - Nombre del mazo                       │
+    │ - Tipo de flashcard                     │
+    │ - Cargar archivo                        │
+    └─────────────────────────────────────────┘
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ Vista Previa de Flashcards              │
+    │ (Verificar antes de sincronizar)        │
+    └─────────────────────────────────────────┘
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ Usuario Hace Clic en "Sync to Anki"     │
+    └─────────────────────────────────────────┘
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ Para Cada Mazo (Secuencial):            │
+    │                                         │
+    │ 1. Crear mazo en Anki (si no existe)   │
+    │ 2. Convertir flashcards al formato      │
+    │ 3. Sincronizar con AnkiConnect          │
+    │ 4. Mostrar progreso                     │
+    └─────────────────────────────────────────┘
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ Mostrar Resumen de Sincronización       │
+    │ - Total de tarjetas sincronizadas       │
+    │ - Errores (si los hay)                  │
+    │ - Tiempo de sincronización              │
+    └─────────────────────────────────────────┘
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ Flashcards Disponibles en Anki          │
+    │ ¡Listo para Estudiar!                   │
+    └─────────────────────────────────────────┘
+
+
+3. TIPOS DE FLASHCARDS
+═══════════════════════════════════════════════════════════════════════════════
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ TIPO 1: BÁSICO (Basic)                                                  │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  Entrada:                                                               │
+    │  P: ¿Qué es WGAN?                                                       │
+    │  R: Wasserstein GAN es una arquitectura...                              │
+    │                                                                         │
+    │  En Anki:                                                               │
+    │  ┌─────────────────────────────────────────────────────────────────┐   │
+    │  │ Anverso: ¿Qué es WGAN?                                          │   │
+    │  │                                                                 │   │
+    │  │ [Mostrar Respuesta]                                             │   │
+    │  │                                                                 │   │
+    │  │ Reverso: Wasserstein GAN es una arquitectura...                │   │
+    │  └─────────────────────────────────────────────────────────────────┘   │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ TIPO 2: OPCIÓN MÚLTIPLE (Multiple Choice)                               │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  Entrada:                                                               │
+    │  P: ¿Cuál es la función de activación?                                  │
+    │  A) ReLU                                                                │
+    │  B) Leaky ReLU                                                          │
+    │  C) Tanh                                                                │
+    │  D) Sigmoid                                                             │
+    │  R: C) Tanh                                                             │
+    │                                                                         │
+    │  En Anki:                                                               │
+    │  ┌─────────────────────────────────────────────────────────────────┐   │
+    │  │ Anverso:                                                        │   │
+    │  │ ¿Cuál es la función de activación?                              │   │
+    │  │                                                                 │   │
+    │  │ A) ReLU                                                         │   │
+    │  │ B) Leaky ReLU                                                   │   │
+    │  │ C) Tanh                                                         │   │
+    │  │ D) Sigmoid                                                      │   │
+    │  │                                                                 │   │
+    │  │ [Mostrar Respuesta]                                             │   │
+    │  │                                                                 │   │
+    │  │ Reverso: C) Tanh                                                │   │
+    │  └─────────────────────────────────────────────────────────────────┘   │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ TIPO 3: RESPUESTA ANIDADA (Cloze)                                        │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  Entrada:                                                               │
+    │  P: La métrica {{c1::F1-Score::Métrica}} combina precisión              │
+    │  R: Ideal para datos desbalanceados                                     │
+    │                                                                         │
+    │  En Anki:                                                               │
+    │  ┌─────────────────────────────────────────────────────────────────┐   │
+    │  │ Anverso: La métrica [...] combina precisión                    │   │
+    │  │                                                                 │   │
+    │  │ [Mostrar Respuesta]                                             │   │
+    │  │                                                                 │   │
+    │  │ Reverso: F1-Score (Métrica)                                     │   │
+    │  │ Extra: Ideal para datos desbalanceados                          │   │
+    │  └─────────────────────────────────────────────────────────────────┘   │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ TIPO 4: VOCABULARIO (Vocabulary)                                         │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  Entrada:                                                               │
+    │  P: Data Augmentation                                                   │
+    │  R: /ˌdeɪtə ɔːɡmɛnˈteɪʃən/ Técnica para incrementar diversidad         │
+    │                                                                         │
+    │  En Anki:                                                               │
+    │  ┌─────────────────────────────────────────────────────────────────┐   │
+    │  │ Anverso:                                                        │   │
+    │  │ Data Augmentation                                               │   │
+    │  │ /ˌdeɪtə ɔːɡmɛnˈteɪʃən/                                          │   │
+    │  │                                                                 │   │
+    │  │ [Mostrar Respuesta]                                             │   │
+    │  │                                                                 │   │
+    │  │ Reverso: Técnica para incrementar la diversidad del dataset    │   │
+    │  └─────────────────────────────────────────────────────────────────┘   │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+
+4. DETECCIÓN Y INICIO DE ANKI
+═══════════════════════════════════════════════════════════════════════════════
+
+    ┌─────────────────────────────────────────┐
+    │ Verificar si Anki está ejecutándose     │
+    │ (Conectar a localhost:8765)             │
+    └─────────────────────────────────────────┘
+            ↓
+        ┌───┴───┐
+        │       │
+      SÍ      NO
+        │       │
+        │   ┌───────────────────────────────┐
+        │   │ Detectar Sistema Operativo    │
+        │   └───────────────────────────────┘
+        │       │
+        │   ┌───┴───┬───────┬───────┐
+        │   │       │       │       │
+        │ WIN   macOS   LINUX   OTRO
+        │   │       │       │       │
+        │   ├───────┼───────┼───────┤
+        │   │       │       │       │
+        │   ↓       ↓       ↓       ↓
+        │  Buscar  open   anki   Error
+        │  anki.exe -a Anki
+        │   │       │       │
+        │   └───┬───┴───┬───┘
+        │       │       │
+        │   ┌───────────────────────────────┐
+        │   │ Esperar hasta 30 segundos     │
+        │   │ (Reintentar conexión)         │
+        │   └───────────────────────────────┘
+        │       │
+        └───┬───┘
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ ¿Anki está ejecutándose?                │
+    └─────────────────────────────────────────┘
+            ↓
+        ┌───┴───┐
+        │       │
+       SÍ      NO
+        │       │
+        ✓      ✗ Error
+
+
+5. SINCRONIZACIÓN SECUENCIAL
+═══════════════════════════════════════════════════════════════════════════════
+
+    Mazo 1: "Conceptos"
+    ├─ Crear mazo en Anki
+    ├─ Convertir 15 flashcards
+    ├─ Sincronizar con AnkiConnect
+    └─ ✓ Completado (15 tarjetas)
+            ↓
+    Mazo 2: "Preguntas"
+    ├─ Crear mazo en Anki
+    ├─ Convertir 10 flashcards
+    ├─ Sincronizar con AnkiConnect
+    └─ ✓ Completado (10 tarjetas)
+            ↓
+    Mazo 3: "Cloze"
+    ├─ Crear mazo en Anki
+    ├─ Convertir 8 flashcards
+    ├─ Sincronizar con AnkiConnect
+    └─ ✓ Completado (8 tarjetas)
+            ↓
+    Mazo 4: "Vocabulary"
+    ├─ Crear mazo en Anki
+    ├─ Convertir 12 flashcards
+    ├─ Sincronizar con AnkiConnect
+    └─ ✓ Completado (12 tarjetas)
+            ↓
+    ┌─────────────────────────────────────────┐
+    │ RESUMEN                                 │
+    │ Total: 45 tarjetas sincronizadas        │
+    │ Tiempo: 12.5 segundos                   │
+    │ Errores: 0                              │
+    └─────────────────────────────────────────┘
+
+
+6. ESTRUCTURA DE ARCHIVOS
+═══════════════════════════════════════════════════════════════════════════════
+
+    proyecto/
+    │
+    ├── INTERFAZ PRINCIPAL
+    │   ├── programa_proyecto_flashcards_automaticas.py (modificado)
+    │   ├── input_banner.py (modificado)
+    │   └── input_method_controller.py (modificado)
+    │
+    ├── ANKI SYNC (NUEVO)
+    │   ├── anki_sync_manager.py
+    │   └── anki_sync_interface.py
+    │
+    ├── EJEMPLOS Y PRUEBAS
+    │   ├── ejemplo_flashcards_anki.json
+    │   └── test_anki_sync.py
+    │
+    └── DOCUMENTACIÓN
+        ├── ANKI_SYNC_GUIDE.md
+        ├── ANKI_INTEGRATION_README.md
+        ├── QUICK_START_ANKI.md
+        ├── INSTALL_ANKICONNECT.md
+        ├── CAMBIOS_ANKI_SYNC.md
+        ├── IMPLEMENTACION_COMPLETADA.md
+        └── FLUJO_VISUAL_ANKI_SYNC.txt (este archivo)
+
+
+7. REQUISITOS
+═══════════════════════════════════════════════════════════════════════════════
+
+    ┌─────────────────────────────────────────┐
+    │ SISTEMA                                 │
+    ├─────────────────────────────────────────┤
+    │ • Python 3.7+                           │
+    │ • Anki 2.1.50+                          │
+    │ • AnkiConnect (complemento)             │
+    └─────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────┐
+    │ DEPENDENCIAS PYTHON                     │
+    ├─────────────────────────────────────────┤
+    │ • requests (para AnkiConnect)           │
+    │ • tkinter (incluido en Python)          │
+    └─────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────┐
+    │ PLATAFORMAS SOPORTADAS                  │
+    ├─────────────────────────────────────────┤
+    │ ✓ Windows                               │
+    │ ✓ macOS                                 │
+    │ ✓ Linux                                 │
+    └─────────────────────────────────────────┘
+
+
+8. ESTADO DE IMPLEMENTACIÓN
+═══════════════════════════════════════════════════════════════════════════════
+
+    [✓] Módulo anki_sync_manager.py
+    [✓] Módulo anki_sync_interface.py
+    [✓] Actualización input_banner.py
+    [✓] Actualización input_method_controller.py
+    [✓] Actualización programa_proyecto_flashcards_automaticas.py
+    [✓] Archivo de ejemplo
+    [✓] Script de prueba
+    [✓] Todas las pruebas pasadas (7/7)
+    [✓] Documentación completa
+    [✓] Sin errores de sintaxis
+    [✓] Interfaz gráfica funcional
+
+    ═══════════════════════════════════════════════════════════════════════════
+    ✓ IMPLEMENTACIÓN COMPLETADA Y TESTEADA
+    ═══════════════════════════════════════════════════════════════════════════
+
+
+═══════════════════════════════════════════════════════════════════════════════
+Última actualización: Noviembre 2025
+Versión: 1.0
+Estado: Producción
+═══════════════════════════════════════════════════════════════════════════════

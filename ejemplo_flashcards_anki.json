@@ -1,0 +1,75 @@
+{
+  "basic": [
+    {
+      "front": "P: ¿Qué es la Penalización de Gradiente (Gradient Penalty - GP) en el contexto de tu arquitectura WGAN-GP?",
+      "back": "R: Es un término de regularización agregado a la función de pérdida del Crítico que fuerza a la norma del gradiente a mantenerse cerca de 1, garantizando la continuidad de Lipschitz y la estabilidad del entrenamiento.",
+      "tags": ["wgan", "conceptos", "basico"]
+    },
+    {
+      "front": "P: Análisis Sistémico: ¿Cuál es la relación causal entre el uso de la Distancia Wasserstein (en lugar de Jensen-Shannon) y la estabilidad del entrenamiento en tu modelo?",
+      "back": "R: La Distancia Wasserstein proporciona gradientes suaves y útiles incluso cuando la distribución real y la generada no se superponen (común al inicio), evitando el problema del desvanecimiento del gradiente que sufren las GANs tradicionales.",
+      "tags": ["wgan", "analisis", "basico"]
+    },
+    {
+      "front": "P: Evaluación: ¿Cuál es el principal trade-off (compromiso) de utilizar una arquitectura Híbrida (GAN + Clasificador) frente a usar solo técnicas de sobremuestreo clásico como SMOTE?",
+      "back": "R: La arquitectura Híbrida genera muestras sintéticas de alta fidelidad visual (realistas), mejorando la generalización, pero a costa de un costo computacional y tiempo de entrenamiento significativamente mayor que SMOTE.",
+      "tags": ["wgan", "evaluacion", "basico"]
+    }
+  ],
+  "multiple_choice": [
+    {
+      "front": "P: En la fase de entrenamiento del clasificador ResNet50, se utilizó la función de pérdida \"Focal Loss\". ¿Cuál es el mecanismo exacto por el cual esta función aborda el desbalance de clases?",
+      "options": [
+        "A) Aumenta el peso de los ejemplos fáciles para mejorar la precisión global.",
+        "B) Reduce el peso de los ejemplos bien clasificados (fáciles), forzando al modelo a centrarse en los ejemplos difíciles (clase minoritaria).",
+        "C) Penaliza la norma del gradiente en las capas finales para evitar el overfitting en la clase mayoritaria.",
+        "D) Genera ruido gaussiano en las muestras de la clase mayoritaria para equilibrar la distribución de características."
+      ],
+      "back": "R: B) Reduce el peso de los ejemplos bien clasificados (fáciles), forzando al modelo a centrarse en los ejemplos difíciles (clase minoritaria).",
+      "tags": ["wgan", "focal_loss", "multiple_choice"]
+    },
+    {
+      "front": "P: Con respecto a la arquitectura del Generador en la WGAN-GP implementada, ¿qué función de activación se utiliza en la capa de salida para generar las imágenes de rayos X normalizadas?",
+      "options": [
+        "A) ReLU (Rectified Linear Unit)",
+        "B) Leaky ReLU con pendiente negativa de 0.2",
+        "C) Tanh (Tangente Hiperbólica)",
+        "D) Sigmoid Global Normalization"
+      ],
+      "back": "R: C) Tanh (Tangente Hiperbólica)",
+      "tags": ["wgan", "arquitectura", "multiple_choice"]
+    }
+  ],
+  "cloze": [
+    {
+      "text": "P: La métrica {{c1::F1-Score::Métrica}} combina la precisión y la exhaustividad, siendo ideal para datos desbalanceados.",
+      "extra": "R: Métrica de evaluación fundamental en machine learning",
+      "tags": ["wgan", "metricas", "cloze"]
+    },
+    {
+      "text": "P: El generador en una WGAN busca minimizar la {{c1::Distancia Wasserstein}} en lugar de la divergencia JS.",
+      "extra": "R: Propiedad fundamental que diferencia WGAN de GANs tradicionales",
+      "tags": ["wgan", "conceptos", "cloze"]
+    }
+  ],
+  "vocabulary": [
+    {
+      "term": "Data Augmentation",
+      "pronunciation": "/ˌdeɪtə ɔːɡmɛnˈteɪʃən/",
+      "context": "Técnica para incrementar la diversidad del dataset mediante transformaciones de datos existentes",
+      "tags": ["vocabulary", "english", "ml"]
+    },
+    {
+      "term": "Vanishing Gradient",
+      "pronunciation": "/ˌvænɪʃɪŋ ˈɡreɪdiənt/",
+      "context": "Problema común en el entrenamiento de redes profundas donde el peso no se actualiza correctamente",
+      "tags": ["vocabulary", "english", "neural_networks"]
+    },
+    {
+      "term": "Loss Function",
+      "pronunciation": "/lɔːs ˈfʌŋkʃən/",
+      "context": "Método para evaluar qué tan bien el algoritmo modela los datos, también llamada función de costo",
+      "tags": ["vocabulary", "english", "ml"]
+    }
+  ]
+}

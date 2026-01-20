@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Archivos de configuración con datos sensibles
+.env
+
+# Archivos de sesión y cache
+flashcard_sessions.json
+pending_flashcards.json
+flashcard_config_sets.json
+flashcards_config.json
+highlights.json
+
+# Archivos de build
+build/
+dist/
+*.spec
+
+# Archivos temporales
+*.log
+*.tmp
+material_estudio.txt
+*.pdf
+
+# Archivos HTML sueltos
+dasfe.html
+hallazgos .html
+
+# Carpeta de Kiro
+.kiro/
