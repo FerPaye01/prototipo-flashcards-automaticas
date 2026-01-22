@@ -1411,18 +1411,21 @@ class AnkiImportInterface:
             # Actualizar botón
             self.root.after(0, self._update_pending_button)
             
-            # Mostrar resultado
+            # Si se importaron exitosamente, resetear indicadores visuales
             if result.get("imported", 0) > 0:
+                self.root.after(0, self._reset_all_status_indicators)
                 self.root.after(0, lambda: messagebox.showinfo(
-                    "Importación completada",
-                    f"Se importaron {result['imported']} flashcards.\n"
-                    f"Pendientes restantes: {result.get('still_pending', 0)}"
+                    "✅ Importación completada",
+                    f"Se importaron {result['imported']} flashcards exitosamente.\n\n"
+                    f"Pendientes restantes: {result.get('still_pending', 0)}\n\n"
+                    f"Los indicadores visuales se han reseteado."
                 ))
             elif result.get("still_pending", 0) > 0:
                 self.root.after(0, lambda: messagebox.showwarning(
-                    "Importación fallida",
-                    f"No se pudieron importar las flashcards.\n"
-                    f"Verifica que Anki esté abierto y AnkiConnect instalado."
+                    "⚠️ Importación fallida",
+                    f"No se pudieron importar las flashcards.\n\n"
+                    f"Verifica que Anki esté abierto y AnkiConnect instalado.\n\n"
+                    f"Pendientes: {result.get('still_pending', 0)}"
                 ))
         
         thread = threading.Thread(target=do_import, daemon=True)
