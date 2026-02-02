@@ -635,225 +635,126 @@ Cada prompt tiene 4 componentes:
 3. **Instrucciones**: Reglas específicas de generación
 4. **Formato de Salida**: Estructura exacta de la respuesta
 
+---
+
+## 📋 PROMPTS COMPLETOS
+
 ### Set 1: Por Defecto (4 tipos)
 
 #### 1. Basic (Pregunta/Respuesta)
 
-**Archivo**: `config_sets_manager.py` → `DEFAULT_PROMPTS["basic"]`
+**PROMPT COMPLETO**:
 
-**Rol**:
 ```
-Asesor experto en pedagogía cognitiva y diseño instruccional,
-especializado en la deconstrucción de material técnico.
-```
+Rol: Asesor experto en pedagogía cognitiva y diseño instruccional para niños.
 
-**Objetivo**:
-```
-Generar flashcards que escalen en profundidad cognitiva (Taxonomía de Bloom).
-Nivel 1: Declarativa (Recordar/Entender)
-```
+Objetivo: Analizar el [Input_Texto_OCR] e identificar los Conceptos Clave. Para CADA concepto identificado, debes generar OBLIGATORIAMENTE un par de tarjetas consecutivas (Tarjeta A y Tarjeta B) siguiendo esta lógica:
 
-**Instrucciones Clave**:
+1. Tarjeta A (El "Qué" - Estricta/Técnica):
 
-1. **Cobertura Completa**:
-   - Genera tantas tarjetas como sean necesarias
-   - Cubre TODO el vocabulario y hechos nuevos
-   - No omitas información por ser breve
+• Objetivo: Recuperación Activa de la definición precisa o el dato exacto.
 
-2. **Concisión en Respuestas**:
-   - Máximo 1-2 oraciones por respuesta
-   - Directo al punto
-   - Sin explicaciones innecesarias
+• Estilo: Pregunta directa y respuesta concisa.
 
-3. **Integración de Autoría**:
-   - Si el texto menciona autores/años, inclúyelos
-   - Ejemplo: "Según Pérez (2020)..."
+2. Tarjeta B (El "Cómo/Por qué" - Estilo Feynman):
 
-4. **Formato Matemático**:
-   - Usa `\\( ... \\)` para fórmulas
-   - Ejemplo: `\\( a^2 + b^2 = c^2 \\)`
+• Objetivo: Comprensión profunda y simplificación.
 
-**Formato de Salida**:
-```
-P: [Pregunta]
-R: [Respuesta concisa]
+• Estilo: La pregunta debe pedir una explicación para un niño de 9 años o una analogía. La respuesta debe usar lenguaje cotidiano, evitando la jerga técnica usada en la Tarjeta A.
 
-P: [Siguiente pregunta]
-R: [Siguiente respuesta]
-```
+Entradas: Input_Texto_OCR: {texto_ocr}
 
-**Ejemplo de Entrada**:
-```
-La fotosíntesis es el proceso mediante el cual las plantas convierten
-la luz solar en energía química. Ocurre en los cloroplastos y produce
-glucosa y oxígeno. La fórmula es: 6CO₂ + 6H₂O + luz → C₆H₁₂O₆ + 6O₂
-```
+Instrucción de Formato de Salida (Estricto): Tu respuesta debe ser una lista de texto plano. Separa los pares de tarjetas con una línea divisoria.
 
-**Ejemplo de Salida**:
-```
-P: ¿Qué es la fotosíntesis?
-R: Proceso por el cual las plantas convierten luz solar en energía química.
+Estructura del Par: [Concepto: Nombre del Concepto] P: [Pregunta  (Estricta) de definición/dato preciso] R: [Respuesta técnica y corta]
 
-P: ¿Dónde ocurre la fotosíntesis?
-R: En los cloroplastos de las células vegetales.
-
-P: ¿Cuáles son los productos de la fotosíntesis?
-R: Glucosa (C₆H₁₂O₆) y oxígeno (O₂).
-
-P: ¿Cuál es la fórmula química de la fotosíntesis?
-R: \\( 6CO_2 + 6H_2O + luz → C_6H_{12}O_6 + 6O_2 \\)
+P: [Pregunta tipo (Feynman): "¿Cómo le explicarías esto a un amigo?" o "Pon un ejemplo de la vida real de..."] R: [Explicación simplificada usando una analogía o vocabulario sencillo, máximo 2 frases]
 ```
 
 
 #### 2. Multiple Choice (Opción Múltiple)
 
-**Rol**:
+**PROMPT COMPLETO**:
+
 ```
-Diseñador Senior de Exámenes de Certificación Técnica y Psicometría.
-```
+Rol: Diseñador Senior de Exámenes de Certificación Técnica y Psicometría.
 
-**Objetivo**:
-```
-Generar preguntas de opción múltiple diseñadas para engañar a estudiantes
-con conocimiento superficial. Los distractores deben ser versiones alteradas
-de la verdad.
-```
+Objetivos: Generar preguntas de opción múltiple diseñadas para engañar a estudiantes con conocimiento superficial. Los distractores deben ser versiones alteradas de la verdad.
 
-**Estrategias de Distractores**:
+Entradas:
+Input_Texto_OCR: {texto_ocr}
 
-1. **El Espejo Sintáctico**:
-   - Misma gramática que la correcta
-   - Cambia una palabra clave técnica
-   - Ejemplo: "Mitocondria" → "Cloroplasto"
+Instrucciones de Ingeniería de Distractores (MANDATORIO):
+Para cada pregunta, genera 3 distractores usando estas estrategias (NO uses lógica inversa simple):
+1. El Espejo Sintáctico: Misma gramática que la correcta, pero cambia una palabra clave técnica.
+2. La Invención Plausible: Inventa un término que suene real pero no exista.
+3. Verdad Mal Atribuida: Describe un beneficio real de otro concepto del texto, pero atribúyelo incorrectamente a la pregunta actual.
 
-2. **La Invención Plausible**:
-   - Inventa un término que suene real
-   - Ejemplo: "Fotosíntesis inversa", "Respiración clorofílica"
-
-3. **Verdad Mal Atribuida**:
-   - Describe un beneficio real de otro concepto
-   - Atribúyelo incorrectamente
-   - Ejemplo: Atribuir función de mitocondria a ribosoma
-
-**Formato de Salida**:
-```
-P: [Pregunta]
+Instrucción de Formato de Salida (Estricto):
+Tu respuesta final debe ser ÚNICAMENTE una lista de texto plano.
+Estructura obligatoria:
+P: [Enunciado de la pregunta]
 a) [Opción]
 b) [Opción]
 c) [Opción]
 d) [Opción]
-R: [Letra] - [Breve explicación]
-```
-
-**Ejemplo de Salida**:
-```
-P: ¿Cuál es la función principal de los cloroplastos?
-a) Producir energía mediante respiración celular
-b) Realizar la fotosíntesis y producir glucosa
-c) Sintetizar proteínas para la célula
-d) Almacenar material genético de la planta
-R: b - Los cloroplastos contienen clorofila y realizan fotosíntesis.
-
-P: ¿Qué gas es liberado como producto de la fotosíntesis?
-a) Dióxido de carbono (CO₂)
-b) Nitrógeno (N₂)
-c) Oxígeno (O₂)
-d) Metano (CH₄)
-R: c - El oxígeno es el producto secundario de la fotosíntesis.
+R: [Letra Correcta] - [Breve explicación del porqué]
+(Deja una línea en blanco entre cada par P/R)
 ```
 
 #### 3. Cloze (Respuesta Anidada)
 
-**Rol**:
+**PROMPT COMPLETO**:
+
 ```
-Editor de Diseño Instruccional experto en minería de textos.
-```
+Rol: Editor de Diseño Instruccional experto en minería de textos.
 
-**Objetivo**:
-```
-Identificar los 10-15 conceptos técnicos, datos o definiciones más críticas
-del texto y convertirlos en tarjetas de memorización "Cloze" (huecos).
-```
+Objetivos:
+Analizar el [Input_Texto_OCR] completo. Tu tarea es identificar los 10-15 conceptos técnicos, datos o definiciones más críticas del texto y convertirlos en tarjetas de memorización "Cloze" (huecos), priorizando la fidelidad al texto original.
 
-**Reglas de Procesamiento**:
+Entradas:
+Input_Texto_OCR: {texto_ocr}
 
-1. **Selección Autónoma**:
-   - Identifica conceptos clave (términos técnicos, métricas, nombres propios)
-   - Ignora información secundaria
+Reglas de Procesamiento:
+Selección Autónoma: Identifica los conceptos clave (términos técnicos, métricas, nombres propios, causas-efectos, procesos). Ignora la paja.
+Fidelidad: Extrae la oración original donde aparece el concepto. Recorta lo innecesario para que la frase tenga sentido por sí sola, pero no la reescribas.
+Lógica de Oclusión (Anki):
+Ocultamiento: Encierra el concepto clave con {{c1::Concepto::Pista}}.
+Pista: La pista (después de los dos puntos) es OBLIGATORIA para dar contexto (ej: ::Métrica, ::Algoritmo, ::Fecha).
+Listas: Si encuentras una enumeración importante, usa {{c1::A}}, {{c2::B}}, {{c3::C}}.
 
-2. **Fidelidad al Texto**:
-   - Extrae la oración original
-   - Recorta lo innecesario
-   - NO reescribas
-
-3. **Lógica de Oclusión**:
-   - Formato: `{{c1::Concepto::Pista}}`
-   - La pista es OBLIGATORIA
-   - Ejemplos de pistas: `::Métrica`, `::Algoritmo`, `::Fecha`, `::Autor`
-
-4. **Listas**:
-   - Usa múltiples oclusiones: `{{c1::A}}`, `{{c2::B}}`, `{{c3::C}}`
-
-**Formato de Salida**:
-```
-P: [Oración con {{c1::concepto::pista}}]
-R: [Contexto adicional]
-```
-
-**Ejemplo de Salida**:
-```
-P: La fotosíntesis ocurre en los {{c1::cloroplastos::orgánulo}} de las células vegetales.
-R: Proceso de conversión de luz en energía
-
-P: Los productos de la fotosíntesis son {{c1::glucosa::azúcar}} y {{c2::oxígeno::gas}}.
-R: Productos finales del proceso
-
-P: La fórmula de la fotosíntesis es {{c1::6CO₂ + 6H₂O + luz → C₆H₁₂O₆ + 6O₂::ecuación química}}.
-R: Ecuación balanceada completa
+Instrucción de Formato de Salida (Estricto)
+No uses bloques de código (```), no uses JSON, y no agregues introducciones ni conclusiones.
+Estructura obligatoria: 
+P: [Oración en español con huecos / Término]
 ```
 
 #### 4. Vocabulary (Vocabulario)
 
-**Rol**:
-```
-Profesor de Inglés especializado en detectar terminología interesante
-en textos técnicos.
-```
+**PROMPT COMPLETO**:
 
-**Objetivo**:
 ```
-Extraer automáticamente los términos, verbos o conceptos más "novedosos"
-o sofisticados. Crear pares de traducción directa para aprender cómo se
-dicen estos conceptos en inglés.
-```
+Rol: Profesor de Inglés especializado en detectar terminología interesante en textos técnicos.
 
-**Criterios de Selección**:
+Objetivo: Leer el [Input_Texto_OCR] y extraer automáticamente una lista de los términos, verbos o conceptos más "novedosos" o sofisticados. Tu trabajo es crear pares de traducción directa para aprender cómo se dicen estos conceptos en inglés.
 
-1. **Autonomía**: Selecciona 10-15 términos relevantes
-2. **Nivel**: Ignora palabras básicas ("el", "tener", "casa")
-3. **Enfoque**: Sustantivos técnicos, verbos académicos, conectores lógicos
+Entrada:
+Input_Texto_OCR: {texto_ocr}
 
-**Formato de Salida**:
-```
-P: [Término en Inglés]
-R: [Traducción en Español] | [Fonética IPA]
+Reglas de Selección (Criterio de la IA):
+Autonomía: Selecciona entre 10 y 15 términos que sean relevantes para el tema del texto.
+Nivel: Ignora palabras básicas (como "el", "tener", "casa"). Busca sustantivos técnicos, verbos académicos o conectores lógicos útiles (ej: "trascendental", "estructurales", "atribuido", "función pública").
+Formato: Proporciona el término en Inglés y su equivalente exacto en el texto en Español + su fonetico IPA.
+
+Instrucción de Formato de Salida (Estricto)
+Tu respuesta final debe ser ÚNICAMENTE una lista de texto plano siguiendo este patrón exacto. No uses bloques de código (```), no uses JSON, y no agregues introducciones ni conclusiones.
+Estructura obligatoria: 
+P: [Aquí va el Estímulo / Pregunta / Oración con huecos / Término] 
+R: [Aquí va la Respuesta / Solución / Definición / Contexto]
+(Deja una línea en blanco entre cada par P/R)
 ```
 
-**Ejemplo de Salida**:
-```
-P: Photosynthesis
-R: Fotosíntesis | /ˌfoʊ.toʊˈsɪn.θə.sɪs/
-
-P: Chloroplast
-R: Cloroplasto | /ˈklɔː.rə.plæst/
-
-P: Glucose
-R: Glucosa | /ˈɡluː.koʊs/
-
-P: Cellular respiration
-R: Respiración celular | /ˈsel.jə.lɚ ˌres.pəˈreɪ.ʃən/
-```
-
+---
 
 ### Set 2: Niveles de Bloom (4 niveles)
 
@@ -861,81 +762,118 @@ Basado en la Taxonomía de Bloom revisada, escalando en complejidad cognitiva.
 
 #### Nivel 1: Cloze (Recordar)
 
-**Objetivo**: Memorización de hechos, definiciones, términos clave.
+**PROMPT COMPLETO**:
 
-**Tipo de Tarjeta**: Cloze (formato Anki)
-
-**Características**:
-- Enfoque en vocabulario técnico
-- Definiciones exactas
-- Datos específicos (fechas, nombres, fórmulas)
-
-**Ejemplo**:
 ```
-P: El proceso de {{c1::fotosíntesis::proceso biológico}} convierte {{c2::luz solar::fuente de energía}} en {{c3::energía química::tipo de energía}}.
-R: Definición básica de fotosíntesis
+Rol: Editor de Diseño Instruccional experto en minería de textos y Anki.
+
+Objetivos:
+Analizar el [Input_Texto_OCR] completo. Tu tarea es identificar los 10-15 conceptos técnicos, datos fácticos, métricas o definiciones más críticas del texto y convertirlos en tarjetas de memorización "Cloze" (huecos).
+
+Entradas:
+Input_Texto_OCR: {texto_ocr}
+
+Reglas de Procesamiento:
+1. Selección Atómica: Identifica términos técnicos, constantes numéricas y nombres de autores. Ignora la paja retórica.
+2. Fidelidad Estricta: Extrae la oración original donde aparece el concepto. Recorta lo innecesario para que la frase sea una oración simple (Sujeto+Verbo+Predicado) pero mantén la terminología exacta.
+3. Citas: Si la frase original menciona un autor o año (ej: "Según Knuth (1978)..."), MANTENLO en la tarjeta.
+
+Lógica de Oclusión (Anki):
+- Ocultamiento: Encierra el concepto clave con {{c1::Concepto::Pista}}.
+- Pista Obligatoria: La pista (después de los dos puntos) es MANDATORIA para dar contexto (ej: ::Métrica, ::Algoritmo, ::Autor).
+- Listas: Si hay una enumeración vital, usa {{c1::A}}, {{c2::B}}, {{c3::C}}.
+
+Instrucción de Formato de Salida (Estricto):
+No uses bloques de código.
+Estructura obligatoria:
+P: [Oración en español con huecos procesados]
+(Deja una línea en blanco entre tarjetas)
 ```
 
 #### Nivel 2: Relaciones (Entender)
 
-**Objetivo**: Comprender relaciones, causas, efectos, comparaciones.
+**PROMPT COMPLETO**:
 
-**Tipo de Tarjeta**: Basic (Pregunta/Respuesta)
-
-**Características**:
-- Preguntas de "¿Por qué?"
-- Relaciones causa-efecto
-- Comparaciones entre conceptos
-
-**Ejemplo**:
 ```
-P: ¿Por qué las plantas necesitan luz solar para la fotosíntesis?
-R: La luz solar proporciona la energía necesaria para romper las moléculas de agua y combinar CO₂ en glucosa.
+Rol: Arquitecto de Sistemas de Conocimiento.
 
-P: ¿Cuál es la relación entre fotosíntesis y respiración celular?
-R: Son procesos inversos: la fotosíntesis produce glucosa y O₂, mientras que la respiración consume glucosa y O₂ para producir energía.
+Objetivo: Generar flashcards de Nivel 2 (Entender) basadas en el [Input_Texto_OCR]. El usuario ya memorizó los términos (Nivel 1); ahora debe comprender sus relaciones sistémicas.
+
+Entradas:
+Input_Texto_OCR: {texto_ocr}
+
+Reglas de Generación (Prohibido Definir):
+No generes preguntas de "¿Qué es?". Usa exclusivamente estos patrones de relación:
+1. Análisis Comparativo: "¿Cuál es la diferencia crítica entre [Concepto A] y [Concepto B] mencionada en el texto?" o "¿En qué coinciden X y Y?"
+2. Causalidad Sistémica: "¿Qué efecto inmediato tiene [Evento X] sobre [Componente Y]?"
+3. Traducción/Interpretación: "El texto afirma [Cita corta]. ¿Qué implica esto para el sistema en términos simples?"
+
+Formato de Respuesta:
+- Concisión: La respuesta debe ser de 1 o 2 oraciones máximo.
+- Analogía Feynman: Si el concepto es muy abstracto, puedes añadir una brevísima analogía al final de la respuesta.
+
+Instrucción de Formato de Salida (Estricto):
+P: [Pregunta Relacional]
+R: [Explicación concisa]
+(Deja una línea en blanco entre pares)
 ```
 
 #### Nivel 3: Aplicación (Aplicar)
 
-**Objetivo**: Aplicar conocimiento a situaciones nuevas, resolver problemas.
+**PROMPT COMPLETO**:
 
-**Tipo de Tarjeta**: Basic (Pregunta/Respuesta)
-
-**Características**:
-- Casos prácticos
-- Problemas a resolver
-- Aplicación en contextos reales
-
-**Ejemplo**:
 ```
-P: Si una planta no recibe luz solar durante varios días, ¿qué le sucederá y por qué?
-R: La planta no podrá realizar fotosíntesis, agotará sus reservas de glucosa, y eventualmente morirá por falta de energía.
+Rol: Entrenador Técnico de Simulaciones.
 
-P: ¿Cómo afectaría un aumento de CO₂ atmosférico a la tasa de fotosíntesis?
-R: Aumentaría la tasa de fotosíntesis hasta cierto punto (saturación), ya que el CO₂ es un reactivo necesario.
+Objetivo: Generar flashcards de Nivel 3 (Aplicar). El usuario debe resolver Micro-Escenarios usando la información del [Input_Texto_OCR]. No preguntes teoría, fuerza la práctica.
+
+Entradas:
+Input_Texto_OCR: {texto_ocr}
+
+Reglas de Generación (Procedimental):
+Crea situaciones donde se deba aplicar una regla, fórmula o criterio de selección.
+1. El Compilador Mental: "Dados los datos [X, Y] presentes en el texto, ¿cuál sería el resultado de aplicar [Fórmula/Regla]?"
+2. Troubleshooting: "El sistema presenta el síntoma [Z]. Basado en el texto, ¿qué herramienta o paso corrige esto?"
+3. Selección de Herramienta: "Para lograr el objetivo [A] con la restricción [B], ¿qué método del texto es el correcto?"
+
+Instrucción de Formato de Salida (Estricto):
+- Matemáticas: Usa formato LaTeX \\( ... \\)
+P: [Escenario / Datos / Problema]
+R: [Solución Exacta / Herramienta Única]
+(Deja una línea en blanco entre pares)
 ```
 
 #### Nivel 4: Análisis (Analizar)
 
-**Objetivo**: Evaluar, comparar, criticar, analizar información compleja.
+**PROMPT COMPLETO**:
 
-**Tipo de Tarjeta**: Basic con Multiple Choice (opción múltiple)
-
-**Características**:
-- Análisis crítico
-- Evaluación de argumentos
-- Comparación de teorías
-- Preguntas de "¿Qué pasaría si...?"
-
-**Ejemplo**:
 ```
-P: Analiza por qué la fotosíntesis es considerada el proceso más importante para la vida en la Tierra.
-R: Porque: 1) Produce oxígeno para la respiración, 2) Es la base de todas las cadenas alimenticias, 3) Regula el CO₂ atmosférico, 4) Almacena energía solar en forma química.
+Rol: Diseñador Senior de Exámenes de Certificación (Psicometría).
 
-P: Evalúa las limitaciones de la fotosíntesis como fuente de energía renovable.
-R: Limitaciones: 1) Eficiencia baja (~1-2% de conversión), 2) Requiere grandes áreas, 3) Depende de condiciones climáticas, 4) Competencia con agricultura.
+Objetivos: Generar preguntas de opción múltiple de alta dificultad para discriminar conocimiento experto de superficial.
+
+Entradas:
+Input_Texto_OCR: {texto_ocr}
+
+Ingeniería de Distractores (MANDATORIO):
+Para cada pregunta, genera 3 distractores diseñados para poner a prueba la atención:
+1. El Espejo Sintáctico: Misma gramática que la correcta, pero cambia una variable clave técnica.
+2. La Invención Plausible: Inventa un término que suene altamente técnico y creíble, pero que sea falso (Trampa de Alucinación).
+3. Verdad Mal Atribuida: Un concepto real y correcto del texto, pero que NO responde a esta pregunta específica (Trampa de Contexto).
+
+Instrucción de Formato de Salida (Estricto):
+Tu respuesta final debe ser ÚNICAMENTE una lista de texto plano.
+Estructura obligatoria:
+P: [Enunciado complejo o escenario]
+a) [Opción]
+b) [Opción]
+c) [Opción]
+d) [Opción]
+R: [Letra Correcta] - [Justificación breve: Por qué es la correcta y por qué la "Verdad Mal Atribuida" es incorrecta aquí]
+(Deja una línea en blanco entre cada par P/R)
 ```
+
+---
 
 ### Personalización de Prompts
 
