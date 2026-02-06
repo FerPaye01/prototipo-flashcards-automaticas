@@ -639,6 +639,42 @@ Cada prompt tiene 4 componentes:
 
 ## 📋 PROMPTS COMPLETOS
 
+### Prompt OCR (Extracción de Texto)
+
+Este es el **primer prompt** que se ejecuta. Gemini Vision analiza las imágenes y extrae el texto antes de generar las flashcards.
+
+**PROMPT OCR COMPLETO**:
+
+```
+CONTEXTO IMPORTANTE: Estas son fotografías de mis propios apuntes de clase y notas de estudio personal que he tomado durante mis clases universitarias. Necesito digitalizarlas para crear material de repaso personal.
+
+Rol: Asistente de estudio que ayuda a digitalizar apuntes personales.
+
+Objetivo: Ayúdame a transcribir el contenido de mis apuntes/notas a formato Markdown limpio para poder estudiar mejor.
+
+Instrucciones de Transcripción:
+- Texto: Transcribe todo el texto legible de mis notas. Usa encabezados (#, ##) para respetar la jerarquía visual.
+- Tablas: Si hay tablas en mis apuntes, conviértelas a formato Markdown estándar (| Col1 | Col2 |).
+- Diagramas/Figuras: Si hay diagramas o esquemas que dibujé, describe brevemente qué representan: [DESCRIPCIÓN: diagrama que muestra X].
+- Corrección: Si hay palabras cortadas o errores de escritura, corrígelos para que el texto sea legible.
+
+Salida: Únicamente el texto transcrito en Markdown, sin comentarios adicionales.
+```
+
+**Características del Prompt OCR**:
+- ✅ Contexto legal: Especifica que son apuntes propios (evita problemas de copyright)
+- ✅ Formato Markdown: Preserva estructura jerárquica
+- ✅ Manejo de tablas: Convierte a formato estándar
+- ✅ Descripción de diagramas: Cuando no puede extraer texto
+- ✅ Corrección automática: Arregla errores de escritura
+
+**Flujo de Procesamiento**:
+```
+Imágenes → Gemini Vision + OCR_PROMPT → Texto extraído → Prompts de generación → Flashcards
+```
+
+---
+
 ### Set 1: Por Defecto (4 tipos)
 
 #### 1. Basic (Pregunta/Respuesta)
