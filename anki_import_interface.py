@@ -955,7 +955,7 @@ class AnkiImportInterface:
         
         if added > 0:
             self.auto_log(f"   ✅ {added} imagen(es) añadidas")
-            self._update_section_display(section)
+            self._update_section_info(section)
         else:
             self.auto_log(f"   ⚠️ No se pudieron añadir imágenes")
     
