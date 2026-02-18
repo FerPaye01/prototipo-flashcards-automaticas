@@ -892,29 +892,113 @@ class AnkiImportInterface:
         self._setup_drop_bindings(drop_frame, section)
     
     def _setup_drop_bindings(self, drop_frame, section):
-        """Configura los bindings para drag and drop."""
-        # Intentar usar tkinterdnd2 para drag and drop real
+        """Configura los bindings para drag and drop desde el explorador de archivos."""
+        # En Windows, tkinter soporta drag & drop nativamente
+        # Necesitamos registrar el widget para recibir eventos de drop
+        
         try:
-            drop_frame.drop_target_register('DND_Files')
+            # Intentar usar tkinterdnd2 si está disponible
+            from tkinterdnd2 import DND_FILES, TkinterDnD
+            
+            drop_frame.drop_target_register(DND_FILES)
             drop_frame.dnd_bind('<<Drop>>', lambda e, s=section: self._on_drop(e, s))
             drop_frame.dnd_bind('<<DragEnter>>', lambda e: drop_frame.config(bg="#c0e0c0"))
             drop_frame.dnd_bind('<<DragLeave>>', lambda e: drop_frame.config(bg="#e0e0e0"))
-        except:
-            # Si no está disponible tkinterdnd2, solo usar click
-            pass
+            
+            self.auto_log("✅ Drag & drop habilitado (tkinterdnd2)")
+            
+        except ImportError:
+            # Fallback: usar método alternativo con tkinter nativo
+            # En Windows, podemos usar el protocolo WM_DROPFILES
+            self.auto_log("⚠️ tkinterdnd2 no disponible, usando método alternativo")
+            
+            # Configurar el frame para aceptar drops
+            drop_frame.bind("<Enter>", lambda e: drop_frame.config(bg="#c0e0c0"))
+            drop_frame.bind("<Leave>", lambda e: drop_frame.config(bg="#e0e0e0"))
+            
+            # Nota: El drag & drop nativo de Windows requiere configuración adicional
+            # Por ahora, el usuario puede usar el botón "Añadir Imágenes" o "Pegar"
     
     def _on_drop(self, event, section):
         """Maneja el evento de drop de archivos."""
-        files = self.root.tk.splitlist(event.data)
-        for file_path in files:
-            if file_path.lower().endswith(self.SUPPORTED_FORMATS):
-                self._add_image_to_section(section, file_path)
-        
-        # Restaurar color
+        # Restaurar color del frame
         widgets = self.section_widgets.get(section.section_id)
         if widgets:
             widgets["drop_frame"].config(bg="#e0e0e0")
-
+        
+        # Obtener las rutas de los archivos
+        files = self._parse_drop_files(event.data)
+        
+        if not files:
+            self.auto_log("⚠️ No se detectaron archivos válidos")
+            return
+        
+        # Filtrar solo imágenes
+        image_files = [f for f in files if f.lower().endswith(self.SUPPORTED_FORMATS)]
+        
+        if not image_files:
+            self.auto_log(f"⚠️ No se encontraron imágenes válidas (formatos soportados: {', '.join(self.SUPPORTED_FORMATS)})")
+            messagebox.showwarning("Sin imágenes", 
+                                  f"No se encontraron imágenes válidas.\n\nFormatos soportados: {', '.join(self.SUPPORTED_FORMATS)}")
+            return
+        
+        # Añadir imágenes a la sección
+        self.auto_log(f"📥 Añadiendo {len(image_files)} imagen(es) a {section.title}...")
+        
+        added = 0
+        for file_path in image_files:
+            result = section.add_image(file_path)
+            if "error" in result:
+                self.auto_log(f"   ❌ {result['error']}")
+            else:
+                added += 1
+        
+        if added > 0:
+            self.auto_log(f"   ✅ {added} imagen(es) añadidas")
+            self._update_section_display(section)
+        else:
+            self.auto_log(f"   ⚠️ No se pudieron añadir imágenes")
+    
+    def _parse_drop_files(self, data):
+        """Parsea los datos del evento de drop para extraer rutas de archivos."""
+        # El formato puede variar según el sistema
+        # En Windows con tkinterdnd2, viene como string con rutas separadas
+        
+        if not data:
+            return []
+        
+        # Convertir a string si es necesario
+        data_str = str(data)
+        
+        # Limpiar y separar rutas
+        # Puede venir como: "{C:/path/file1.png} {C:/path/file2.png}"
+        # O como: "C:/path/file1.png C:/path/file2.png"
+        
+        files = []
+        
+        # Método 1: Rutas entre llaves
+        if '{' in data_str:
+            import re
+            matches = re.findall(r'\{([^}]+)\}', data_str)
+            files.extend(matches)
+        
+        # Método 2: Rutas separadas por espacios (cuidado con espacios en nombres)
+        if not files:
+            # Intentar split simple
+            parts = data_str.split()
+            for part in parts:
+                part = part.strip('{}')
+                if os.path.exists(part):
+                    files.append(part)
+        
+        # Método 3: Una sola ruta
+        if not files:
+            data_clean = data_str.strip('{}').strip()
+            if os.path.exists(data_clean):
+                files.append(data_clean)
+        
+        return files
+    
     def browse_images(self, section: ImageSection):
         """Abre diálogo para seleccionar imágenes."""
         filetypes = [
@@ -3225,7 +3309,16 @@ class AnkiImportInterface:
 
 def main():
     """Inicia la aplicación."""
-    root = tk.Tk()
+    # Intentar usar TkinterDnD para drag & drop si está disponible
+    try:
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+        print("✅ TkinterDnD habilitado - Drag & drop disponible")
+    except ImportError:
+        root = tk.Tk()
+        print("⚠️ TkinterDnD no disponible - Usa botones para añadir imágenes")
+        print("   Para habilitar drag & drop, instala: pip install tkinterdnd2")
+    
     app = AnkiImportInterface(root)
     root.mainloop()
 
