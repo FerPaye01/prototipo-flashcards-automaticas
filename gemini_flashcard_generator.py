@@ -276,6 +276,89 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         self._log(f"⚠️ Todos los modelos Gemini fallaron, usando Tesseract...")
         return self._extract_with_tesseract(images)
     
+    def extract_text_from_files(self, file_paths: List[str]) -> str:
+        """
+        Extrae y estructura texto de archivos .txt usando Gemini File API.
+        Diseñado para transcripciones de video que necesitan estructuración.
+        
+        Args:
+            file_paths: Lista de rutas a archivos .txt (máximo 10)
+            
+        Returns:
+            Texto estructurado y limpio
+        """
+        if not self.ocr_api_key:
+            self._log("❌ API Key OCR no configurada en .env (GEMINI_API_KEY_OCR)")
+            return ""
+        
+        if len(file_paths) > 10:
+            self._log(f"⚠️ Máximo 10 archivos permitidos, recibidos {len(file_paths)}")
+            file_paths = file_paths[:10]
+        
+        self._log(f"📄 Procesando {len(file_paths)} archivos de texto...")
+        
+        genai.configure(api_key=self.ocr_api_key)
+        
+        # Lista de modelos a intentar
+        models_to_try = [self.model_name] + [m for m in self.FALLBACK_MODELS if m != self.model_name]
+        
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                
+                self._log(f"🚀 Procesando con modelo: {model_name}...")
+                
+                # Leer y preparar los archivos
+                content_parts = [self.OCR_PROMPT]
+                
+                for idx, file_path in enumerate(file_paths, 1):
+                    self._log(f"   📄 {idx}/{len(file_paths)}: {os.path.basename(file_path)}")
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            file_content = f.read()
+                            content_parts.append(f"\n\n--- Archivo {idx}: {os.path.basename(file_path)} ---\n{file_content}")
+                    except Exception as e:
+                        self._log(f"   ⚠️ Error leyendo archivo: {e}")
+                        continue
+                
+                # Combinar todo el contenido
+                combined_content = "\n".join(content_parts)
+                
+                # Generar respuesta
+                response = model.generate_content(combined_content)
+                
+                if response and response.text:
+                    text = response.text
+                    self._log(f"✅ Procesamiento completado: {len(text)} caracteres")
+                    return text
+                else:
+                    self._log("⚠️ Respuesta vacía, probando siguiente modelo...")
+                    continue
+                    
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Detectar error de cuota - probar siguiente modelo
+                if "quota" in error_str or "429" in error_str or "resource" in error_str:
+                    self._log(f"⚠️ Cuota excedida en {model_name}, probando siguiente modelo...")
+                    continue
+                
+                # Otro error - probar siguiente modelo
+                self._log(f"⚠️ Error con {model_name}: {e}")
+                continue
+        
+        # Si todos los modelos fallaron, concatenar el texto sin procesar
+        self._log(f"⚠️ Todos los modelos fallaron, concatenando texto sin procesar...")
+        combined_text = []
+        for file_path in file_paths:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    combined_text.append(f.read())
+            except:
+                pass
+        
+        return "\n\n".join(combined_text)
+    
     def _extract_with_tesseract(self, images: List[tuple]) -> str:
         """Extrae texto usando Tesseract OCR como fallback."""
         if not TESSERACT_AVAILABLE:
@@ -695,8 +778,199 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
             pass
         return 0
 
+    def process_video_section(self, section_title: str, transcription_paths: List[str], 
+                             converter, anki_manager, deck_prefix: str) -> Dict[str, Any]:
+        """
+        Procesa una sección de video completa: OCR de transcripciones → APIs → Conversión → Importación Anki.
+        
+        Args:
+            section_title: Título de la sección
+            transcription_paths: Lista de rutas a archivos .txt con transcripciones (máx 10)
+            converter: FlashcardsConverter
+            anki_manager: AnkiSyncManager
+            deck_prefix: Prefijo para los mazos de Anki
+            
+        Returns:
+            Dict con resultados del procesamiento
+        """
+        self._log(f"\n{'='*60}")
+        self._log(f"📁 PROCESANDO SECCIÓN DE VIDEO: {section_title}")
+        self._log(f"{'='*60}")
+        self._log(f"   📄 Transcripciones: {len(transcription_paths)}")
+        
+        # Paso 1: Procesar transcripciones con Gemini OCR
+        self._log("\n📖 PASO 1: PROCESAMIENTO DE TRANSCRIPCIONES CON GEMINI")
+        texto_estructurado = self.extract_text_from_files(transcription_paths)
+        
+        if not texto_estructurado.strip():
+            self._log("❌ No se pudo procesar las transcripciones")
+            return {"success": False, "error": "No text extracted", "section": section_title}
+        
+        # Paso 2: Generar flashcards con las APIs (secuencial)
+        self._log("\n🤖 PASO 2: GENERACIÓN SECUENCIAL CON GEMINI")
+        api_results = self.generate_all_flashcards_sequential(texto_estructurado)
+        
+        # Paso 3: Convertir e importar a Anki
+        self._log("\n📥 PASO 3: CONVERSIÓN E IMPORTACIÓN A ANKI")
+        import_results = {}
+        
+        type_labels = {
+            "basic": "Basic",
+            "multiple_choice": "Multiple Choice", 
+            "cloze": "Cloze",
+            "vocabulary": "Vocabulary",
+            # Niveles Bloom
+            "level_1_cloze": "Nivel 1 - Cloze",
+            "level_2_relations": "Nivel 2 - Relaciones",
+            "level_3_application": "Nivel 3 - Aplicación",
+            "level_4_analysis": "Nivel 4 - Análisis"
+        }
+        
+        for card_type, result in api_results.items():
+            if not result.get("success"):
+                self._log(f"   ⚠️ [{card_type}] Saltando - Error en generación")
+                import_results[card_type] = {"success": False, "error": result.get("error")}
+                continue
+            
+            content = result.get("content", "")
+            deck_name = f"{deck_prefix} - {type_labels[card_type]}"
+            
+            try:
+                # Convertir a formato TSV
+                tsv_content = converter.convert(content, card_type)
+                
+                if not tsv_content:
+                    self._log(f"   ⚠️ [{card_type}] No se pudieron parsear flashcards")
+                    import_results[card_type] = {"success": False, "error": "Parse failed"}
+                    continue
+                
+                # Parsear flashcards para Anki
+                flashcards = self._parse_tsv_to_flashcards(tsv_content)
+                
+                if not flashcards:
+                    self._log(f"   ⚠️ [{card_type}] Lista de flashcards vacía")
+                    import_results[card_type] = {"success": False, "error": "Empty flashcards"}
+                    continue
+                
+                # Importar a Anki con reintentos
+                success, msg, count = self._import_to_anki_with_retry(
+                    anki_manager, deck_name, flashcards, card_type
+                )
+                
+                if success:
+                    self._log(f"   ✅ [{card_type}] {count} flashcards importadas a '{deck_name}'")
+                    import_results[card_type] = {"success": True, "count": count, "deck": deck_name}
+                else:
+                    self._log(f"   ❌ [{card_type}] Error: {msg}")
+                    import_results[card_type] = {"success": False, "error": msg}
+                    
+            except Exception as e:
+                self._log(f"   ❌ [{card_type}] Excepción: {e}")
+                import_results[card_type] = {"success": False, "error": str(e)}
+        
+        return {
+            "success": True,
+            "section": section_title,
+            "text_length": len(texto_estructurado),
+            "results": import_results
+        }
+    
     def process_section(self, section_title: str, image_paths: List[str], 
                        converter, anki_manager, deck_prefix: str) -> Dict[str, Any]:
+        """
+        Procesa una sección de video completa: OCR de transcripciones → APIs → Conversión → Importación Anki.
+        
+        Args:
+            section_title: Título de la sección
+            transcription_paths: Lista de rutas a archivos .txt con transcripciones (máx 10)
+            converter: FlashcardsConverter
+            anki_manager: AnkiSyncManager
+            deck_prefix: Prefijo para los mazos de Anki
+            
+        Returns:
+            Dict con resultados del procesamiento
+        """
+        self._log(f"\n{'='*60}")
+        self._log(f"📁 PROCESANDO SECCIÓN DE VIDEO: {section_title}")
+        self._log(f"{'='*60}")
+        self._log(f"   📄 Transcripciones: {len(transcription_paths)}")
+        
+        # Paso 1: Procesar transcripciones con Gemini OCR
+        self._log("\n📖 PASO 1: PROCESAMIENTO DE TRANSCRIPCIONES CON GEMINI")
+        texto_estructurado = self.extract_text_from_files(transcription_paths)
+        
+        if not texto_estructurado.strip():
+            self._log("❌ No se pudo procesar las transcripciones")
+            return {"success": False, "error": "No text extracted", "section": section_title}
+        
+        # Paso 2: Generar flashcards con las APIs (secuencial)
+        self._log("\n🤖 PASO 2: GENERACIÓN SECUENCIAL CON GEMINI")
+        api_results = self.generate_all_flashcards_sequential(texto_estructurado)
+        
+        # Paso 3: Convertir e importar a Anki
+        self._log("\n📥 PASO 3: CONVERSIÓN E IMPORTACIÓN A ANKI")
+        import_results = {}
+        
+        type_labels = {
+            "basic": "Basic",
+            "multiple_choice": "Multiple Choice", 
+            "cloze": "Cloze",
+            "vocabulary": "Vocabulary",
+            # Niveles Bloom
+            "level_1_cloze": "Nivel 1 - Cloze",
+            "level_2_relations": "Nivel 2 - Relaciones",
+            "level_3_application": "Nivel 3 - Aplicación",
+            "level_4_analysis": "Nivel 4 - Análisis"
+        }
+        
+        for card_type, result in api_results.items():
+            if not result.get("success"):
+                self._log(f"   ⚠️ [{card_type}] Saltando - Error en generación")
+                import_results[card_type] = {"success": False, "error": result.get("error")}
+                continue
+            
+            content = result.get("content", "")
+            deck_name = f"{deck_prefix} - {type_labels[card_type]}"
+            
+            try:
+                # Convertir a formato TSV
+                tsv_content = converter.convert(content, card_type)
+                
+                if not tsv_content:
+                    self._log(f"   ⚠️ [{card_type}] No se pudieron parsear flashcards")
+                    import_results[card_type] = {"success": False, "error": "Parse failed"}
+                    continue
+                
+                # Parsear flashcards para Anki
+                flashcards = self._parse_tsv_to_flashcards(tsv_content)
+                
+                if not flashcards:
+                    self._log(f"   ⚠️ [{card_type}] Lista de flashcards vacía")
+                    import_results[card_type] = {"success": False, "error": "Empty flashcards"}
+                    continue
+                
+                # Importar a Anki con reintentos
+                success, msg, count = self._import_to_anki_with_retry(
+                    anki_manager, deck_name, flashcards, card_type
+                )
+                
+                if success:
+                    self._log(f"   ✅ [{card_type}] {count} flashcards importadas a '{deck_name}'")
+                    import_results[card_type] = {"success": True, "count": count, "deck": deck_name}
+                else:
+                    self._log(f"   ❌ [{card_type}] Error: {msg}")
+                    import_results[card_type] = {"success": False, "error": msg}
+                    
+            except Exception as e:
+                self._log(f"   ❌ [{card_type}] Excepción: {e}")
+                import_results[card_type] = {"success": False, "error": str(e)}
+        
+        return {
+            "success": True,
+            "section": section_title,
+            "text_length": len(texto_estructurado),
+            "results": import_results
+        }
         """
         Procesa una sección completa: OCR → 4 APIs → Conversión → Importación Anki.
         """
