@@ -462,6 +462,51 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         self._log("\n✅ GENERACIÓN COMPLETADA")
         return results
     
+    def generate_all_flashcards_sequential(self, texto_ocr: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Genera flashcards de forma SECUENCIAL usando las APIs en orden.
+        Procesa: API1 (tipo1) → API2 (tipo2) → API3 (tipo3) → API4 (tipo4)
+        
+        Este método es específico para el Modo Texto donde queremos usar
+        las 4 APIs diferentes de forma ordenada.
+        """
+        results = {}
+        
+        # Filtrar solo los tipos activos
+        active_types = [t for t, active in self.active_types.items() if active]
+        
+        self._log("\n" + "="*50)
+        self._log(f"🚀 GENERACIÓN SECUENCIAL ({len(active_types)} tipos activos)")
+        self._log("="*50)
+        
+        if not active_types:
+            self._log("⚠️ No hay tipos de flashcards activos")
+            return results
+        
+        # Ordenar tipos por su API asignada para procesamiento secuencial
+        # Esto asegura que usamos API1 → API2 → API3 → API4 en orden
+        sorted_types = sorted(active_types, key=lambda t: self.TYPE_TO_API_INDEX.get(t, 1))
+        
+        self._log(f"📋 Orden de procesamiento:")
+        for card_type in sorted_types:
+            api_idx = self.TYPE_TO_API_INDEX.get(card_type, 1)
+            self._log(f"   API{api_idx}: {card_type}")
+        
+        # Procesar cada tipo secuencialmente
+        for idx, card_type in enumerate(sorted_types, 1):
+            api_idx = self.TYPE_TO_API_INDEX.get(card_type, 1)
+            self._log(f"\n[{idx}/{len(sorted_types)}] Procesando {card_type} con API{api_idx}...")
+            
+            result = self.generate_flashcards_single(texto_ocr, card_type)
+            results[card_type] = result
+            
+            # Pequeña pausa entre llamadas para evitar rate limiting
+            if idx < len(sorted_types):
+                time.sleep(2)
+        
+        self._log("\n✅ GENERACIÓN SECUENCIAL COMPLETADA")
+        return results
+    
     def _parse_tsv_to_flashcards(self, tsv_content: str) -> List[Dict[str, str]]:
         """Convierte contenido TSV a lista de flashcards."""
         flashcards = []
