@@ -496,13 +496,12 @@ class AnkiImportInterface:
     def setup_automatic_videos_mode(self):
         """Configura la vista del modo automático para videos."""
         self.automatic_videos_frame = ttk.Frame(self.root, padding="10")
-        self.automatic_videos_frame.columnconfigure(0, weight=3)
-        self.automatic_videos_frame.columnconfigure(1, weight=1)
-        self.automatic_videos_frame.rowconfigure(1, weight=1)
+        self.automatic_videos_frame.columnconfigure(0, weight=1)
+        self.automatic_videos_frame.rowconfigure(2, weight=1)
         
         # Header con botón de retroceso
         header_frame = ttk.Frame(self.automatic_videos_frame)
-        header_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         header_frame.columnconfigure(1, weight=1)
         
         back_btn = ttk.Button(header_frame, text="← Volver", command=self.show_normal_mode)
@@ -512,15 +511,9 @@ class AnkiImportInterface:
                                font=("Arial", 14, "bold"))
         title_label.grid(row=0, column=1, sticky="w", padx=20)
         
-        # Panel izquierdo: Configuración y videos
-        left_container = ttk.Frame(self.automatic_videos_frame)
-        left_container.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
-        left_container.columnconfigure(0, weight=1)
-        left_container.rowconfigure(1, weight=1)
-        
-        # Frame de configuración
-        config_frame = ttk.LabelFrame(left_container, text="⚙️ Configuración de Segmentación", padding="10")
-        config_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        # Frame de configuración y carga de video
+        config_frame = ttk.LabelFrame(self.automatic_videos_frame, text="⚙️ Configuración y Video", padding="10")
+        config_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         config_frame.columnconfigure(1, weight=1)
         
         # Duración de segmento
@@ -549,85 +542,139 @@ class AnkiImportInterface:
             self.overlap_label.config(text=f"{self.overlap_var.get()} seg")
         self.overlap_var.trace_add("write", update_overlap_label)
         
-        # Opciones de segmentación
-        ttk.Label(config_frame, text="Métodos de segmentación:").grid(row=2, column=0, sticky="nw", pady=5)
-        methods_frame = ttk.Frame(config_frame)
-        methods_frame.grid(row=2, column=1, columnspan=2, sticky="w", pady=5)
-        
-        self.use_silence_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(methods_frame, text="Detección de silencios", 
-                       variable=self.use_silence_var).pack(anchor="w")
-        
-        self.use_transcription_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(methods_frame, text="Análisis de transcripción (Whisper)", 
-                       variable=self.use_transcription_var).pack(anchor="w")
-        
         # Idioma
-        ttk.Label(config_frame, text="Idioma del video:").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Label(config_frame, text="Idioma del video:").grid(row=2, column=0, sticky="w", pady=5)
         self.language_var = tk.StringVar(value="es")
         language_combo = ttk.Combobox(config_frame, textvariable=self.language_var, 
                                      values=["es", "en", "fr", "de", "it", "pt"], 
                                      state="readonly", width=10)
-        language_combo.grid(row=3, column=1, sticky="w", padx=5)
+        language_combo.grid(row=2, column=1, sticky="w", padx=5)
         
-        # Frame de videos (scrollable)
-        videos_frame = ttk.LabelFrame(left_container, text="📹 Videos Cargados", padding="5")
-        videos_frame.grid(row=1, column=0, sticky="nsew")
-        videos_frame.columnconfigure(0, weight=1)
-        videos_frame.rowconfigure(0, weight=1)
+        # Botones de carga y procesamiento
+        buttons_frame = ttk.Frame(config_frame)
+        buttons_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         
-        # Canvas con scrollbar para videos
-        self.videos_canvas = tk.Canvas(videos_frame, highlightthickness=0)
-        videos_scrollbar = ttk.Scrollbar(videos_frame, orient="vertical", 
-                                        command=self.videos_canvas.yview)
+        self.upload_video_btn = ttk.Button(buttons_frame, text="📁 Cargar Video", 
+                                           command=self.upload_video_for_processing)
+        self.upload_video_btn.pack(side="left", padx=5)
         
-        self.videos_inner_frame = ttk.Frame(self.videos_canvas)
-        self.videos_inner_frame.columnconfigure(0, weight=1)
+        self.process_video_btn = ttk.Button(buttons_frame, text="🚀 Procesar Video",
+                                            command=self.process_video_complete, state="disabled")
+        self.process_video_btn.pack(side="left", padx=5)
         
-        self.videos_canvas.create_window((0, 0), window=self.videos_inner_frame, 
-                                        anchor="nw", tags="inner")
-        self.videos_canvas.configure(yscrollcommand=videos_scrollbar.set)
+        self.video_info_label = ttk.Label(buttons_frame, text="", foreground="gray")
+        self.video_info_label.pack(side="left", padx=10)
         
-        self.videos_canvas.grid(row=0, column=0, sticky="nsew")
-        videos_scrollbar.grid(row=0, column=1, sticky="ns")
+        # Contenedor principal con 2 columnas
+        main_container = ttk.Frame(self.automatic_videos_frame)
+        main_container.grid(row=2, column=0, sticky="nsew")
+        main_container.columnconfigure(0, weight=2)
+        main_container.columnconfigure(1, weight=1)
+        main_container.rowconfigure(0, weight=1)
+        
+        # Panel izquierdo: Segmentos y Secciones
+        left_panel = ttk.Frame(main_container)
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        left_panel.columnconfigure(0, weight=1)
+        left_panel.rowconfigure(0, weight=1)
+        left_panel.rowconfigure(1, weight=1)
+        
+        # Área de segmentos procesados
+        segments_frame = ttk.LabelFrame(left_panel, text="📹 Segmentos Procesados", padding="5")
+        segments_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
+        segments_frame.columnconfigure(0, weight=1)
+        segments_frame.rowconfigure(0, weight=1)
+        
+        # Canvas con scrollbar para segmentos
+        self.segments_canvas = tk.Canvas(segments_frame, highlightthickness=0, height=200)
+        segments_scrollbar = ttk.Scrollbar(segments_frame, orient="vertical", 
+                                          command=self.segments_canvas.yview)
+        
+        self.segments_inner_frame = ttk.Frame(self.segments_canvas)
+        self.segments_inner_frame.columnconfigure(0, weight=1)
+        
+        self.segments_canvas.create_window((0, 0), window=self.segments_inner_frame, 
+                                          anchor="nw", tags="inner")
+        self.segments_canvas.configure(yscrollcommand=segments_scrollbar.set)
+        
+        self.segments_canvas.grid(row=0, column=0, sticky="nsew")
+        segments_scrollbar.grid(row=0, column=1, sticky="ns")
         
         # Bind para actualizar scroll region
-        self.videos_inner_frame.bind("<Configure>", 
-                                     lambda e: self.videos_canvas.configure(
-                                         scrollregion=self.videos_canvas.bbox("all")))
-        self.videos_canvas.bind("<Configure>", 
-                               lambda e: self.videos_canvas.itemconfig("inner", width=e.width))
+        self.segments_inner_frame.bind("<Configure>", 
+            lambda e: self.segments_canvas.configure(scrollregion=self.segments_canvas.bbox("all")))
+        self.segments_canvas.bind("<Configure>", 
+            lambda e: self.segments_canvas.itemconfig("inner", width=e.width))
+        
+        # Área de configuración de agrupación
+        grouping_frame = ttk.LabelFrame(left_panel, text="📋 Configurar Agrupación", padding="10")
+        grouping_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        grouping_frame.columnconfigure(1, weight=1)
+        
+        ttk.Label(grouping_frame, text="Transcripciones por sección:").grid(row=0, column=0, sticky="w", padx=5)
+        self.segments_per_section_var = tk.IntVar(value=2)
+        segments_spinbox = ttk.Spinbox(grouping_frame, from_=1, to=10, 
+                                       textvariable=self.segments_per_section_var, width=10)
+        segments_spinbox.grid(row=0, column=1, sticky="w", padx=5)
+        
+        self.create_sections_btn = ttk.Button(grouping_frame, text="✨ Crear Secciones",
+                                             command=self.create_video_sections_from_segments,
+                                             state="disabled")
+        self.create_sections_btn.grid(row=0, column=2, padx=5)
+        
+        # Área de secciones creadas
+        sections_frame = ttk.LabelFrame(left_panel, text="📚 Secciones Creadas", padding="5")
+        sections_frame.grid(row=2, column=0, sticky="nsew", pady=(5, 0))
+        sections_frame.columnconfigure(0, weight=1)
+        sections_frame.rowconfigure(0, weight=1)
+        
+        # Canvas con scrollbar para secciones
+        self.video_sections_canvas = tk.Canvas(sections_frame, highlightthickness=0)
+        sections_scrollbar = ttk.Scrollbar(sections_frame, orient="vertical", 
+                                          command=self.video_sections_canvas.yview)
+        
+        self.video_sections_inner_frame = ttk.Frame(self.video_sections_canvas)
+        self.video_sections_inner_frame.columnconfigure(0, weight=1)
+        
+        self.video_sections_canvas.create_window((0, 0), window=self.video_sections_inner_frame, 
+                                                anchor="nw", tags="inner")
+        self.video_sections_canvas.configure(yscrollcommand=sections_scrollbar.set)
+        
+        self.video_sections_canvas.grid(row=0, column=0, sticky="nsew")
+        sections_scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        # Bind para actualizar scroll region
+        self.video_sections_inner_frame.bind("<Configure>", 
+            lambda e: self.video_sections_canvas.configure(scrollregion=self.video_sections_canvas.bbox("all")))
+        self.video_sections_canvas.bind("<Configure>", 
+            lambda e: self.video_sections_canvas.itemconfig("inner", width=e.width))
         
         # Panel derecho: Logs
-        right_frame = ttk.LabelFrame(self.automatic_videos_frame, text="Logs de Videos", padding="5")
-        right_frame.grid(row=1, column=1, sticky="nsew")
-        right_frame.columnconfigure(0, weight=1)
-        right_frame.rowconfigure(0, weight=1)
+        right_panel = ttk.LabelFrame(main_container, text="📋 Logs de Videos", padding="5")
+        right_panel.grid(row=0, column=1, sticky="nsew")
+        right_panel.columnconfigure(0, weight=1)
+        right_panel.rowconfigure(0, weight=1)
         
-        self.video_logs_text = tk.Text(right_frame, width=40, wrap="word")
+        self.video_logs_text = tk.Text(right_panel, width=40, wrap="word")
         self.video_logs_text.grid(row=0, column=0, sticky="nsew")
         
-        video_logs_scrollbar = ttk.Scrollbar(right_frame, orient="vertical", 
+        video_logs_scrollbar = ttk.Scrollbar(right_panel, orient="vertical", 
                                             command=self.video_logs_text.yview)
         video_logs_scrollbar.grid(row=0, column=1, sticky="ns")
         self.video_logs_text.config(yscrollcommand=video_logs_scrollbar.set)
         
-        # Panel inferior: Botones
+        # Panel inferior: Botones de acción
         bottom_frame = ttk.Frame(self.automatic_videos_frame)
-        bottom_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        bottom_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         
-        upload_video_btn = ttk.Button(bottom_frame, text="📁 Cargar Video", 
-                                      command=self.upload_video)
-        upload_video_btn.pack(side="left", padx=5)
+        self.process_sections_btn = ttk.Button(bottom_frame, text="🚀 Procesar Secciones",
+                                              command=self.process_video_sections,
+                                              state="disabled")
+        self.process_sections_btn.pack(side="left", padx=5)
         
-        clear_videos_btn = ttk.Button(bottom_frame, text="🗑 Limpiar Videos",
-                                      command=self.clear_videos)
-        clear_videos_btn.pack(side="left", padx=5)
-        
-        # Botón principal de procesamiento
-        self.process_videos_btn = ttk.Button(bottom_frame, text="🚀 Procesar Videos",
-                                            command=self.process_videos)
-        self.process_videos_btn.pack(side="left", padx=15)
+        self.clear_video_btn = ttk.Button(bottom_frame, text="🗑 Limpiar Todo",
+                                         command=self.clear_video_mode)
+        self.clear_video_btn.pack(side="left", padx=5)
         
         # Botón de configuración
         config_btn = ttk.Button(bottom_frame, text="⚙️ Configuración",
@@ -1829,8 +1876,8 @@ class AnkiImportInterface:
     
     # ==================== MÉTODOS DE VIDEOS ====================
     
-    def upload_video(self):
-        """Abre diálogo para seleccionar un video."""
+    def upload_video_for_processing(self):
+        """Abre diálogo para seleccionar un video y lo prepara para procesamiento."""
         filetypes = [
             ("Videos", "*.mp4 *.avi *.mov *.mkv"),
             ("Todos los archivos", "*.*")
@@ -1851,72 +1898,17 @@ class AnkiImportInterface:
         self.video_log(f"✅ {msg}")
         self.video_log(f"📁 Video cargado: {os.path.basename(file_path)}")
         
-        # Añadir a la lista de videos
-        self._add_video_to_list(file_path)
+        # Guardar referencia al video
+        self.current_video_path = file_path
+        self.video_info_label.config(text=f"📹 {os.path.basename(file_path)}")
+        
+        # Habilitar botón de procesamiento
+        self.process_video_btn.config(state="normal")
     
-    def _add_video_to_list(self, video_path: str):
-        """Añade un video a la lista visual."""
-        video_name = os.path.basename(video_path)
-        video_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
-        
-        # Crear widget para el video
-        video_frame = ttk.Frame(self.videos_inner_frame, relief="groove", borderwidth=2)
-        video_frame.grid(row=len(self.video_sessions), column=0, sticky="ew", pady=5, padx=5)
-        video_frame.columnconfigure(1, weight=1)
-        
-        # Icono y nombre
-        ttk.Label(video_frame, text="🎬", font=("Segoe UI", 16)).grid(row=0, column=0, padx=5, pady=5)
-        
-        info_frame = ttk.Frame(video_frame)
-        info_frame.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
-        
-        ttk.Label(info_frame, text=video_name, font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        ttk.Label(info_frame, text=f"Tamaño: {video_size:.1f} MB", 
-                 font=("Segoe UI", 9), foreground="gray").pack(anchor="w")
-        
-        # Botón eliminar
-        delete_btn = ttk.Button(video_frame, text="🗑", width=3,
-                               command=lambda: self._remove_video(video_path, video_frame))
-        delete_btn.grid(row=0, column=2, padx=5)
-        
-        # Guardar referencia
-        self.video_sessions.append({
-            "path": video_path,
-            "name": video_name,
-            "frame": video_frame,
-            "processed": False
-        })
-    
-    def _remove_video(self, video_path: str, frame: ttk.Frame):
-        """Elimina un video de la lista."""
-        # Eliminar widget
-        frame.destroy()
-        
-        # Eliminar de la lista
-        self.video_sessions = [v for v in self.video_sessions if v["path"] != video_path]
-        
-        self.video_log(f"🗑 Video eliminado: {os.path.basename(video_path)}")
-        
-        # Reorganizar grid
-        for idx, video_data in enumerate(self.video_sessions):
-            video_data["frame"].grid(row=idx, column=0, sticky="ew", pady=5, padx=5)
-    
-    def clear_videos(self):
-        """Limpia todos los videos."""
-        if not self.video_sessions:
-            return
-        
-        if messagebox.askyesno("Confirmar", "¿Eliminar todos los videos cargados?"):
-            for video_data in self.video_sessions:
-                video_data["frame"].destroy()
-            
-            self.video_sessions.clear()
-            self.video_log("🗑 Todos los videos eliminados")
-    
-    def process_videos(self):
-        """Procesa todos los videos cargados."""
-        if not self.video_sessions:
-            messagebox.showwarning("Sin videos", "No hay videos cargados para procesar.")
+    def process_video_complete(self):
+        """Procesa el video completo: segmenta, extrae audio y transcribe."""
+        if not self.current_video_path:
+            messagebox.showwarning("Sin video", "No hay video cargado.")
             return
         
         if self.is_processing:
@@ -1924,39 +1916,402 @@ class AnkiImportInterface:
             return
         
         # Confirmar
-        msg = f"¿Procesar {len(self.video_sessions)} video(s)?\n\n"
+        msg = f"¿Procesar el video?\n\n"
         msg += "Esto realizará:\n"
-        msg += "1. Transcripción con Whisper (si está habilitado)\n"
-        msg += "2. Segmentación inteligente del video\n"
-        msg += "3. Extracción de contenido de cada segmento\n"
-        msg += "4. Generación de flashcards con Gemini\n"
-        msg += "5. Importación automática a Anki\n\n"
-        msg += "Nota: Este proceso puede tomar varios minutos por video."
+        msg += "1. Segmentación del video según configuración\n"
+        msg += "2. Extracción de audio de cada segmento (MP3)\n"
+        msg += "3. Transcripción con Whisper\n\n"
+        msg += "Nota: Este proceso puede tomar varios minutos."
         
         if not messagebox.askyesno("Confirmar procesamiento", msg):
             return
         
         # Iniciar procesamiento en thread
         self.is_processing = True
-        self.process_videos_btn.config(state="disabled", text="⏳ Procesando...")
+        self.process_video_btn.config(state="disabled", text="⏳ Procesando...")
+        self.upload_video_btn.config(state="disabled")
         
-        thread = threading.Thread(target=self._process_videos_thread, daemon=True)
+        thread = threading.Thread(target=self._process_video_thread, daemon=True)
         thread.start()
     
-    def _process_videos_thread(self):
-        """Thread de procesamiento de videos."""
+    def _process_video_thread(self):
+        """Thread de procesamiento del video."""
         try:
             # Obtener configuración
             segment_duration = self.segment_duration_var.get() * 60  # Convertir a segundos
             overlap = self.overlap_var.get()
-            use_silence = self.use_silence_var.get()
-            use_transcription = self.use_transcription_var.get()
             language = self.language_var.get()
             
-            # Obtener configuración activa de flashcards
+            self.video_log(f"\n{'='*60}")
+            self.video_log(f"🎬 PROCESANDO VIDEO")
+            self.video_log(f"{'='*60}")
+            
+            # Procesar video con video_processor
+            result = self.video_processor.process_video(
+                video_path=self.current_video_path,
+                segment_duration=segment_duration,
+                overlap=overlap,
+                use_silence_detection=False,
+                use_transcription_analysis=False,
+                language=language
+            )
+            
+            if not result.get("success"):
+                self.video_log(f"❌ Error procesando video: {result.get('error')}")
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Error", f"Error procesando video:\n{result.get('error')}"))
+                return
+            
+            # Guardar segmentos
+            self.current_video_segments = result.get("segments", [])
+            
+            self.video_log(f"\n✅ Video procesado exitosamente")
+            self.video_log(f"   📊 {len(self.current_video_segments)} segmentos creados")
+            self.video_log(f"   📝 Total de caracteres: {result.get('total_chars', 0):,}")
+            
+            # Mostrar segmentos en la UI
+            self.root.after(0, self._display_video_segments)
+            
+            # Habilitar botón de crear secciones
+            self.root.after(0, lambda: self.create_sections_btn.config(state="normal"))
+            
+            # Mostrar popup
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Procesamiento completado",
+                f"Video procesado exitosamente\n\n"
+                f"Segmentos creados: {len(self.current_video_segments)}\n"
+                f"Total de caracteres: {result.get('total_chars', 0):,}\n\n"
+                f"Ahora puedes configurar la agrupación en secciones."
+            ))
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.video_log(f"\n❌ ERROR CRÍTICO: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            self.root.after(0, lambda msg=error_msg: messagebox.showerror(
+                "Error", f"Error durante el procesamiento:\n{msg}"))
+        
+        finally:
+            self.is_processing = False
+            self.root.after(0, lambda: self.process_video_btn.config(
+                state="normal", text="🚀 Procesar Video"
+            ))
+            self.root.after(0, lambda: self.upload_video_btn.config(state="normal"))
+    
+    def _display_video_segments(self):
+        """Muestra los segmentos procesados en la UI."""
+        # Limpiar segmentos anteriores
+        for widget in self.segments_inner_frame.winfo_children():
+            widget.destroy()
+        
+        self.video_segment_widgets.clear()
+        
+        # Crear tarjetas para cada segmento
+        for segment in self.current_video_segments:
+            self._create_segment_widget(segment)
+    
+    def _create_segment_widget(self, segment: VideoSegment):
+        """Crea el widget visual para un segmento de video."""
+        segment_frame = ttk.Frame(self.segments_inner_frame, relief="groove", borderwidth=2)
+        segment_frame.grid(row=segment.segment_id-1, column=0, sticky="ew", pady=5, padx=5)
+        segment_frame.columnconfigure(0, weight=1)
+        
+        # Header con info del segmento
+        header_frame = ttk.Frame(segment_frame)
+        header_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        
+        ttk.Label(header_frame, text=f"Segmento {segment.segment_id}", 
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Label(header_frame, text=f"{segment.get_time_range_str()}", 
+                 font=("Segoe UI", 9), foreground="gray").pack(side="left", padx=10)
+        ttk.Label(header_frame, text=f"{segment.char_count:,} caracteres", 
+                 font=("Segoe UI", 9), foreground="blue").pack(side="left")
+        
+        # Botones de acción
+        buttons_frame = ttk.Frame(segment_frame)
+        buttons_frame.grid(row=1, column=0, pady=5)
+        
+        # Botón de reproducción
+        play_btn = ttk.Button(buttons_frame, text="▶️", width=5,
+                             command=lambda s=segment: self.play_segment_audio(s))
+        play_btn.pack(side="left", padx=5)
+        
+        # Botón ver transcripción
+        view_btn = ttk.Button(buttons_frame, text="📄 Ver Transcripción", width=18,
+                             command=lambda s=segment: self.show_transcription_dialog(s))
+        view_btn.pack(side="left", padx=5)
+        
+        # Guardar referencias
+        self.video_segment_widgets[segment.segment_id] = {
+            "frame": segment_frame,
+            "play_btn": play_btn,
+            "view_btn": view_btn,
+            "segment": segment
+        }
+    
+    def play_segment_audio(self, segment: VideoSegment):
+        """Reproduce el audio de un segmento."""
+        if not segment.audio_path or not os.path.exists(segment.audio_path):
+            self.video_log(f"❌ Audio no encontrado para segmento {segment.segment_id}")
+            messagebox.showerror("Error", "Archivo de audio no encontrado.")
+            return
+        
+        # Cambiar icono a pause
+        widgets = self.video_segment_widgets.get(segment.segment_id)
+        if widgets:
+            widgets["play_btn"].config(text="⏸️")
+        
+        self.video_log(f"▶️ Reproduciendo segmento {segment.segment_id}...")
+        
+        # Reproducir en thread para no bloquear UI
+        def play_thread():
+            try:
+                self.video_processor.play_audio(segment.audio_path)
+            except Exception as e:
+                self.video_log(f"❌ Error reproduciendo audio: {e}")
+            finally:
+                # Restaurar icono
+                if widgets:
+                    self.root.after(0, lambda: widgets["play_btn"].config(text="▶️"))
+        
+        thread = threading.Thread(target=play_thread, daemon=True)
+        thread.start()
+    
+    def show_transcription_dialog(self, segment: VideoSegment):
+        """Muestra una ventana emergente con la transcripción completa."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Transcripción - Segmento {segment.segment_id}")
+        dialog.geometry("600x400")
+        
+        # Header
+        header_frame = ttk.Frame(dialog, padding="10")
+        header_frame.pack(fill="x")
+        
+        ttk.Label(header_frame, text=f"Segmento {segment.segment_id}: {segment.get_time_range_str()}", 
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(header_frame, text=f"Duración: {segment.duration:.1f}s | Caracteres: {segment.char_count:,}", 
+                 font=("Segoe UI", 9), foreground="gray").pack(anchor="w")
+        
+        # Text widget con scrollbar
+        text_frame = ttk.Frame(dialog, padding="10")
+        text_frame.pack(fill="both", expand=True)
+        
+        text_widget = tk.Text(text_frame, wrap="word", font=("Consolas", 10))
+        text_widget.pack(side="left", fill="both", expand=True)
+        
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        scrollbar.pack(side="right", fill="y")
+        text_widget.config(yscrollcommand=scrollbar.set)
+        
+        # Insertar transcripción
+        text_widget.insert("1.0", segment.transcription_text)
+        text_widget.config(state="disabled")  # Solo lectura
+        
+        # Botones
+        buttons_frame = ttk.Frame(dialog, padding="10")
+        buttons_frame.pack(fill="x")
+        
+        def copy_to_clipboard():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(segment.transcription_text)
+            self.video_log(f"📋 Transcripción del segmento {segment.segment_id} copiada al portapapeles")
+        
+        ttk.Button(buttons_frame, text="📋 Copiar", command=copy_to_clipboard).pack(side="left", padx=5)
+        ttk.Button(buttons_frame, text="Cerrar", command=dialog.destroy).pack(side="right", padx=5)
+    
+    def create_video_sections_from_segments(self):
+        """Crea secciones automáticamente agrupando segmentos."""
+        if not self.current_video_segments:
+            messagebox.showwarning("Sin segmentos", "No hay segmentos procesados.")
+            return
+        
+        segments_per_section = self.segments_per_section_var.get()
+        
+        if segments_per_section < 1 or segments_per_section > 10:
+            messagebox.showerror("Error", "El número de transcripciones por sección debe estar entre 1 y 10.")
+            return
+        
+        # Limpiar secciones anteriores
+        self.video_sections.clear()
+        for widget in self.video_sections_inner_frame.winfo_children():
+            widget.destroy()
+        self.video_section_widgets.clear()
+        
+        # Crear secciones
+        self.video_section_counter = 0
+        total_segments = len(self.current_video_segments)
+        
+        for i in range(0, total_segments, segments_per_section):
+            self.video_section_counter += 1
+            section = VideoSection(self.video_section_counter)
+            
+            # Añadir segmentos a la sección
+            for j in range(i, min(i + segments_per_section, total_segments)):
+                segment = self.current_video_segments[j]
+                section.add_segment(segment)
+            
+            self.video_sections.append(section)
+            self._create_video_section_widget(section)
+        
+        self.video_log(f"✨ Creadas {len(self.video_sections)} secciones con {segments_per_section} transcripciones cada una")
+        
+        # Habilitar botón de procesamiento
+        self.process_sections_btn.config(state="normal")
+        
+        messagebox.showinfo("Secciones creadas", 
+                           f"Se crearon {len(self.video_sections)} secciones.\n\n"
+                           f"Ahora puedes reorganizar los segmentos arrastrándolos\n"
+                           f"entre secciones si lo deseas, o procesar directamente.")
+    
+    def _create_video_section_widget(self, section: VideoSection):
+        """Crea el widget visual para una sección de video."""
+        section_frame = ttk.LabelFrame(self.video_sections_inner_frame, padding="10")
+        section_frame.grid(row=len(self.video_sections)-1, column=0, sticky="ew", pady=5, padx=5)
+        section_frame.columnconfigure(0, weight=1)
+        
+        # Header con título editable
+        header_frame = ttk.Frame(section_frame)
+        header_frame.grid(row=0, column=0, sticky="ew")
+        header_frame.columnconfigure(1, weight=1)
+        
+        title_var = tk.StringVar(value=section.title)
+        title_label = ttk.Label(header_frame, text=section.title, font=("Arial", 11, "bold"))
+        title_label.grid(row=0, column=0, sticky="w")
+        
+        title_entry = ttk.Entry(header_frame, textvariable=title_var, width=20)
+        
+        edit_btn = ttk.Button(header_frame, text="✏", width=3)
+        edit_btn.grid(row=0, column=1, sticky="w", padx=5)
+        
+        confirm_btn = ttk.Button(header_frame, text="✓", width=3)
+        
+        def start_edit():
+            title_label.grid_forget()
+            edit_btn.grid_forget()
+            title_entry.grid(row=0, column=0, sticky="w")
+            confirm_btn.grid(row=0, column=1, sticky="w", padx=5)
+            title_entry.focus()
+        
+        def confirm_edit():
+            new_title = title_var.get().strip() or f"Sección {section.section_id}"
+            section.title = new_title
+            title_label.config(text=new_title)
+            title_entry.grid_forget()
+            confirm_btn.grid_forget()
+            title_label.grid(row=0, column=0, sticky="w")
+            edit_btn.grid(row=0, column=1, sticky="w", padx=5)
+            self.video_log(f"📝 Sección {section.section_id} renombrada a: {new_title}")
+        
+        edit_btn.config(command=start_edit)
+        confirm_btn.config(command=confirm_edit)
+        title_entry.bind("<Return>", lambda e: confirm_edit())
+        
+        # Info de la sección
+        info_frame = ttk.Frame(section_frame)
+        info_frame.grid(row=1, column=0, sticky="w", pady=5)
+        
+        segments_label = ttk.Label(info_frame, 
+                                   text=f"Segmentos: {', '.join([str(s.segment_id) for s in section.segments])}")
+        segments_label.pack(side="left", padx=5)
+        
+        chars_label = ttk.Label(info_frame, text=f"Total: {section.get_total_chars():,} caracteres",
+                               foreground="blue")
+        chars_label.pack(side="left", padx=5)
+        
+        # Indicadores de estado
+        status_frame = ttk.Frame(section_frame)
+        status_frame.grid(row=2, column=0, sticky="w", pady=(5, 0))
+        
+        # Obtener tipos activos
+        active_config = self.config_manager.get_active_set()
+        active_types = active_config.get("active_types", {})
+        
+        type_icons = {
+            "basic": ("📝", "Basic"),
+            "multiple_choice": ("🔘", "Multiple"),
+            "cloze": ("🔲", "Cloze"),
+            "vocabulary": ("🔤", "Vocab"),
+            "level_1_cloze": ("1️⃣", "L1"),
+            "level_2_relations": ("2️⃣", "L2"),
+            "level_3_application": ("3️⃣", "L3"),
+            "level_4_analysis": ("4️⃣", "L4")
+        }
+        
+        status_labels = {}
+        card_types_icons = [
+            (card_type, *type_icons.get(card_type, ("❓", card_type[:6])))
+            for card_type, is_active in active_types.items() if is_active
+        ]
+        
+        for idx, (card_type, icon, label) in enumerate(card_types_icons):
+            type_frame = ttk.Frame(status_frame)
+            type_frame.grid(row=0, column=idx, padx=(0, 15))
+            
+            icon_label = ttk.Label(type_frame, text=icon, font=("Segoe UI", 9))
+            icon_label.grid(row=0, column=0)
+            
+            state_label = tk.Label(type_frame, text="⬜", font=("Segoe UI", 9), fg="gray")
+            state_label.grid(row=0, column=1, padx=2)
+            
+            count_label = ttk.Label(type_frame, text="", font=("Segoe UI", 8))
+            count_label.grid(row=0, column=2)
+            
+            status_labels[card_type] = {
+                "state": state_label,
+                "count": count_label
+            }
+        
+        # Guardar referencias
+        self.video_section_widgets[section.section_id] = {
+            "frame": section_frame,
+            "title_label": title_label,
+            "segments_label": segments_label,
+            "chars_label": chars_label,
+            "status_labels": status_labels,
+            "section": section
+        }
+    
+    def process_video_sections(self):
+        """Procesa todas las secciones de video con Gemini."""
+        if not self.video_sections:
+            messagebox.showwarning("Sin secciones", "No hay secciones creadas.")
+            return
+        
+        if self.is_processing:
+            messagebox.showwarning("En proceso", "Ya hay un procesamiento en curso.")
+            return
+        
+        # Confirmar
+        total_chars = sum(s.get_total_chars() for s in self.video_sections)
+        msg = f"¿Procesar {len(self.video_sections)} sección(es)?\n\n"
+        msg += f"Total de caracteres: {total_chars:,}\n\n"
+        msg += "Esto realizará:\n"
+        msg += "1. Procesamiento de transcripciones con Gemini OCR\n"
+        msg += "2. Generación SECUENCIAL de flashcards\n"
+        msg += "3. Importación automática a Anki\n\n"
+        msg += "Nota: Este proceso puede tomar varios minutos."
+        
+        if not messagebox.askyesno("Confirmar procesamiento", msg):
+            return
+        
+        # Resetear indicadores
+        self._reset_all_video_status_indicators()
+        
+        # Iniciar procesamiento en thread
+        self.is_processing = True
+        self.process_sections_btn.config(state="disabled", text="⏳ Procesando...")
+        
+        thread = threading.Thread(target=self._process_video_sections_thread, daemon=True)
+        thread.start()
+    
+    def _process_video_sections_thread(self):
+        """Thread de procesamiento de secciones de video."""
+        try:
+            # Obtener configuración activa
             active_config = self.config_manager.get_active_set()
             
-            # Inicializar o actualizar generador con la configuración
+            # Inicializar o actualizar generador
             if not self.flashcard_generator:
                 self.flashcard_generator = GeminiFlashcardGenerator(
                     log_callback=self.video_log,
@@ -1965,88 +2320,151 @@ class AnkiImportInterface:
             else:
                 self.flashcard_generator.update_config(active_config)
             
-            self.video_log(f"📋 Usando configuración: {active_config.get('name', 'Por Defecto')}")
+            self.video_log(f"\n📋 Usando configuración: {active_config.get('name', 'Por Defecto')}")
             self.video_log(f"   Modelo: {self.flashcard_generator.model_name}")
             
             total_flashcards = 0
             
-            # Procesar cada video
-            for idx, video_data in enumerate(self.video_sessions, 1):
-                video_path = video_data["path"]
-                video_name = video_data["name"]
-                
+            # Procesar cada sección
+            for idx, section in enumerate(self.video_sections, 1):
                 self.video_log(f"\n{'='*60}")
-                self.video_log(f"🎬 PROCESANDO VIDEO {idx}/{len(self.video_sessions)}: {video_name}")
+                self.video_log(f"📁 PROCESANDO SECCIÓN {idx}/{len(self.video_sections)}: {section.title}")
                 self.video_log(f"{'='*60}")
+                self.video_log(f"   📄 Segmentos: {section.get_segment_count()}")
+                self.video_log(f"   📝 Caracteres: {section.get_total_chars():,}")
                 
-                # Procesar video con video_processor
-                result = self.video_processor.process_video(
-                    video_path=video_path,
-                    segment_duration=segment_duration,
-                    overlap=overlap,
-                    use_silence_detection=use_silence,
-                    use_transcription_analysis=use_transcription,
-                    language=language
-                )
+                # Obtener rutas de transcripciones
+                transcription_paths = section.get_transcription_paths()
                 
-                if not result.get("success"):
-                    self.video_log(f"❌ Error procesando video: {result.get('error')}")
+                if not transcription_paths:
+                    self.video_log(f"⚠️ No hay transcripciones en esta sección")
                     continue
                 
-                segments = result.get("segments", [])
-                self.video_log(f"✅ Video segmentado en {len(segments)} partes")
+                # Procesar sección con Gemini
+                result = self.flashcard_generator.process_video_section(
+                    section_title=section.title,
+                    transcription_paths=transcription_paths,
+                    converter=self.converter,
+                    anki_manager=self.anki_manager,
+                    deck_prefix=section.title
+                )
                 
-                # Procesar cada segmento
-                for seg_idx, segment in enumerate(segments, 1):
-                    self.video_log(f"\n📊 Segmento {seg_idx}/{len(segments)}")
-                    
-                    if not segment.file_path or not os.path.exists(segment.file_path):
-                        self.video_log(f"⚠️ Archivo de segmento no encontrado")
-                        continue
-                    
-                    # Extraer frames del segmento (tomar 3 frames distribuidos)
-                    # Por ahora, usar el segmento completo como "imagen"
-                    # TODO: Implementar extracción de frames clave
-                    
-                    # Por ahora, procesar el video completo como si fuera una imagen
-                    # En el futuro, extraer frames y procesarlos
-                    self.video_log(f"⚠️ Procesamiento de segmentos de video aún no implementado completamente")
-                    self.video_log(f"   Se requiere extracción de frames clave del segmento")
-                
-                # Marcar como procesado
-                video_data["processed"] = True
-                
-                # Limpiar sesión temporal
-                session_dir = result.get("session_dir")
-                if session_dir:
-                    self.video_processor.cleanup_session(session_dir)
+                if result.get("success"):
+                    # Actualizar indicadores visuales
+                    import_results = result.get("results", {})
+                    for card_type, card_result in import_results.items():
+                        if card_result.get("success"):
+                            count = card_result.get("count", 0)
+                            total_flashcards += count
+                            self.root.after(0, lambda sid=section.section_id, ct=card_type, c=count:
+                                          self._update_video_section_status(sid, ct, True, c))
+                        else:
+                            self.root.after(0, lambda sid=section.section_id, ct=card_type:
+                                          self._update_video_section_status(sid, ct, False, 0))
             
             self.video_log(f"\n{'='*60}")
             self.video_log(f"✅ PROCESAMIENTO COMPLETADO")
-            self.video_log(f"   • Videos procesados: {len(self.video_sessions)}")
-            self.video_log(f"   • Total flashcards: {total_flashcards}")
+            self.video_log(f"   • Secciones procesadas: {len(self.video_sections)}")
+            self.video_log(f"   • Total flashcards importadas: {total_flashcards}")
             self.video_log(f"{'='*60}\n")
             
             # Mostrar popup
             self.root.after(0, lambda: messagebox.showinfo(
                 "Procesamiento completado",
-                f"Videos procesados: {len(self.video_sessions)}\n"
-                f"Total flashcards: {total_flashcards}\n\n"
-                f"Nota: La extracción de frames y generación de flashcards\n"
-                f"desde segmentos de video está en desarrollo."
+                f"Secciones procesadas: {len(self.video_sections)}\n"
+                f"Total flashcards importadas: {total_flashcards}"
             ))
             
         except Exception as e:
             error_msg = str(e)
             self.video_log(f"\n❌ ERROR CRÍTICO: {error_msg}")
+            import traceback
+            traceback.print_exc()
             self.root.after(0, lambda msg=error_msg: messagebox.showerror(
                 "Error", f"Error durante el procesamiento:\n{msg}"))
         
         finally:
             self.is_processing = False
-            self.root.after(0, lambda: self.process_videos_btn.config(
-                state="normal", text="🚀 Procesar Videos"
+            self.root.after(0, lambda: self.process_sections_btn.config(
+                state="normal", text="🚀 Procesar Secciones"
             ))
+    
+    def _update_video_section_status(self, section_id: int, card_type: str, success: bool, count: int):
+        """Actualiza el indicador visual de estado de una sección de video."""
+        widgets = self.video_section_widgets.get(section_id)
+        if not widgets or "status_labels" not in widgets:
+            return
+        
+        status_labels = widgets["status_labels"]
+        if card_type not in status_labels:
+            return
+        
+        state_label = status_labels[card_type]["state"]
+        count_label = status_labels[card_type]["count"]
+        
+        if success:
+            state_label.config(text="✅", fg="green")
+            count_label.config(text=str(count))
+        else:
+            state_label.config(text="❌", fg="red")
+            count_label.config(text="")
+    
+    def _reset_all_video_status_indicators(self):
+        """Resetea todos los indicadores de estado de video."""
+        for section_id, widgets in self.video_section_widgets.items():
+            if "status_labels" not in widgets:
+                continue
+            
+            for card_type, labels in widgets["status_labels"].items():
+                labels["state"].config(text="⬜", fg="gray")
+                labels["count"].config(text="")
+    
+    def clear_video_mode(self):
+        """Limpia todo el modo video."""
+        if not self.current_video_segments and not self.video_sections:
+            return
+        
+        if messagebox.askyesno("Confirmar", "¿Limpiar todo el modo video?\n\nEsto eliminará segmentos y secciones."):
+            # Limpiar segmentos
+            self.current_video_path = None
+            self.current_video_segments.clear()
+            for widget in self.segments_inner_frame.winfo_children():
+                widget.destroy()
+            self.video_segment_widgets.clear()
+            
+            # Limpiar secciones
+            self.video_sections.clear()
+            for widget in self.video_sections_inner_frame.winfo_children():
+                widget.destroy()
+            self.video_section_widgets.clear()
+            
+            # Resetear UI
+            self.video_info_label.config(text="")
+            self.process_video_btn.config(state="disabled")
+            self.create_sections_btn.config(state="disabled")
+            self.process_sections_btn.config(state="disabled")
+            
+            self.video_log("🗑 Modo video limpiado")
+    
+    def upload_video(self):
+        """Método antiguo - redirige al nuevo método."""
+        self.upload_video_for_processing()
+    
+    def clear_videos(self):
+        """Método antiguo - redirige al nuevo método."""
+        self.clear_video_mode()
+    
+    def process_videos(self):
+        """Método antiguo - redirige al nuevo método."""
+        self.process_video_complete()
+    
+    def _add_video_to_list(self, video_path: str):
+        """Método antiguo - ya no se usa."""
+        pass
+    
+    def _remove_video(self, video_path: str, frame: ttk.Frame):
+        """Método antiguo - ya no se usa."""
+        pass
     
     def log(self, message: str):
         """Añade un mensaje al log del modo normal."""
