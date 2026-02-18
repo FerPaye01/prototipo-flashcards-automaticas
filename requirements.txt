@@ -54,3 +54,12 @@ websockets==15.0.1
 openai-whisper==20231117
 ffmpeg-python==0.2.0
 Pillow==10.2.0
+
+# Audio playback
+playsound==1.3.0
+
+# Drag & drop support (optional but recommended)
+tkinterdnd2==0.3.0
+
+# OCR fallback (optional)
+pytesseract==0.3.10
