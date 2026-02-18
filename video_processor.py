@@ -26,20 +26,76 @@ try:
 except ImportError:
     FFMPEG_AVAILABLE = False
 
+# playsound para reproducción
+try:
+    from playsound import playsound
+    PLAYSOUND_AVAILABLE = True
+except ImportError:
+    PLAYSOUND_AVAILABLE = False
+
 
 class VideoSegment:
-    """Representa un segmento de video."""
+    """Representa un segmento de audio extraído de un video."""
     
     def __init__(self, start_time: float, end_time: float, segment_id: int):
         self.start_time = start_time  # En segundos
         self.end_time = end_time
         self.segment_id = segment_id
         self.duration = end_time - start_time
-        self.file_path = None
-        self.transcription = ""
+        self.audio_path = None  # Ruta al archivo de audio MP3
+        self.transcription_path = None  # Ruta al archivo .txt con transcripción
+        self.transcription_text = ""  # Texto de la transcripción
+        self.char_count = 0  # Número de caracteres
+        self.section_id = None  # ID de la sección a la que pertenece (None si no está asignado)
+    
+    def get_time_range_str(self) -> str:
+        """Retorna el rango de tiempo formateado."""
+        start_min = int(self.start_time // 60)
+        start_sec = int(self.start_time % 60)
+        end_min = int(self.end_time // 60)
+        end_sec = int(self.end_time % 60)
+        return f"{start_min}:{start_sec:02d}-{end_min}:{end_sec:02d}"
     
     def __repr__(self):
-        return f"Segment {self.segment_id}: {self.start_time:.1f}s - {self.end_time:.1f}s ({self.duration:.1f}s)"
+        return f"Segment {self.segment_id}: {self.get_time_range_str()} ({self.duration:.1f}s, {self.char_count} chars)"
+
+
+class VideoSection:
+    """Representa una sección que agrupa múltiples segmentos de video."""
+    
+    def __init__(self, section_id: int):
+        self.section_id = section_id
+        self.title = f"Sección {section_id}"
+        self.segments = []  # Lista de VideoSegment
+    
+    def add_segment(self, segment: VideoSegment):
+        """Añade un segmento a la sección."""
+        if len(self.segments) >= 10:
+            return False  # Límite de 10 transcripciones por sección
+        segment.section_id = self.section_id
+        self.segments.append(segment)
+        return True
+    
+    def remove_segment(self, segment: VideoSegment):
+        """Elimina un segmento de la sección."""
+        if segment in self.segments:
+            segment.section_id = None
+            self.segments.remove(segment)
+    
+    def get_total_chars(self) -> int:
+        """Retorna el total de caracteres de todos los segmentos."""
+        return sum(seg.char_count for seg in self.segments)
+    
+    def get_segment_count(self) -> int:
+        """Retorna el número de segmentos."""
+        return len(self.segments)
+    
+    def get_transcription_paths(self) -> List[str]:
+        """Retorna las rutas de los archivos de transcripción."""
+        return [seg.transcription_path for seg in self.segments if seg.transcription_path]
+    
+    def __repr__(self):
+        return f"Section {self.section_id}: {len(self.segments)} segments, {self.get_total_chars()} chars"
 
 
 class VideoProcessor:
@@ -333,14 +389,14 @@ class VideoProcessor:
         
         return segments
     
-    def cut_video_segment(
+    def extract_audio_segment(
         self,
         video_path: str,
         segment: VideoSegment,
         output_dir: str
     ) -> str:
         """
-        Corta un segmento del video.
+        Extrae el audio de un segmento del video como MP3.
         
         Args:
             video_path: Ruta al video original
@@ -348,28 +404,103 @@ class VideoProcessor:
             output_dir: Directorio de salida
             
         Returns:
-            Ruta al archivo del segmento
+            Ruta al archivo de audio MP3
         """
         output_path = os.path.join(
             output_dir,
-            f"segment_{segment.segment_id:03d}.mp4"
+            f"segment_{segment.segment_id:03d}.mp3"
         )
         
         try:
-            # Usar ffmpeg para cortar
+            # Usar ffmpeg para extraer audio
             (
                 ffmpeg
                 .input(video_path, ss=segment.start_time, t=segment.duration)
-                .output(output_path, codec='copy', loglevel='error')
+                .output(output_path, acodec='libmp3lame', audio_bitrate='128k', loglevel='error')
                 .overwrite_output()
                 .run()
             )
             
-            segment.file_path = output_path
+            segment.audio_path = output_path
             return output_path
         
         except Exception as e:
-            self._log(f"❌ Error cortando segmento {segment.segment_id}: {e}")
+            self._log(f"❌ Error extrayendo audio del segmento {segment.segment_id}: {e}")
+            return None
+    
+    def transcribe_segment(
+        self,
+        segment: VideoSegment,
+        language: str = "es"
+    ) -> str:
+        """
+        Transcribe un segmento de audio usando Whisper.
+        
+        Args:
+            segment: VideoSegment con audio_path
+            language: Código de idioma
+            
+        Returns:
+            Texto de la transcripción
+        """
+        if not segment.audio_path or not os.path.exists(segment.audio_path):
+            self._log(f"❌ No se encontró audio para segmento {segment.segment_id}")
+            return ""
+        
+        self.load_whisper_model()
+        
+        try:
+            result = self.whisper_model.transcribe(
+                segment.audio_path,
+                language=language,
+                verbose=False
+            )
+            
+            transcription_text = result['text'].strip()
+            segment.transcription_text = transcription_text
+            segment.char_count = len(transcription_text)
+            
+            return transcription_text
+        
+        except Exception as e:
+            self._log(f"❌ Error transcribiendo segmento {segment.segment_id}: {e}")
+            return ""
+    
+    def save_transcription_to_file(
+        self,
+        segment: VideoSegment,
+        output_dir: str
+    ) -> str:
+        """
+        Guarda la transcripción de un segmento en un archivo .txt.
+        
+        Args:
+            segment: VideoSegment con transcription_text
+            output_dir: Directorio de salida
+            
+        Returns:
+            Ruta al archivo .txt
+        """
+        output_path = os.path.join(
+            output_dir,
+            f"transcription_{segment.segment_id:03d}.txt"
+        )
+        
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                # Escribir metadata como comentario
+                f.write(f"# Segmento {segment.segment_id}\n")
+                f.write(f"# Tiempo: {segment.get_time_range_str()}\n")
+                f.write(f"# Duración: {segment.duration:.1f}s\n")
+                f.write(f"# Caracteres: {segment.char_count}\n")
+                f.write("\n")
+                f.write(segment.transcription_text)
+            
+            segment.transcription_path = output_path
+            return output_path
+        
+        except Exception as e:
+            self._log(f"❌ Error guardando transcripción del segmento {segment.segment_id}: {e}")
             return None
     
     def process_video(
@@ -382,12 +513,12 @@ class VideoProcessor:
         language: str = "es"
     ) -> Dict[str, Any]:
         """
-        Procesa un video completo: valida, transcribe y segmenta.
+        Procesa un video completo: valida, segmenta, extrae audio y transcribe.
         
         Args:
             video_path: Ruta al video
-            segment_duration: Duración objetivo de segmentos
-            overlap: Overlap entre segmentos
+            segment_duration: Duración objetivo de segmentos en segundos
+            overlap: Overlap entre segmentos en segundos
             use_silence_detection: Usar detección de silencios
             use_transcription_analysis: Usar análisis de transcripción
             language: Idioma del video
@@ -414,75 +545,64 @@ class VideoProcessor:
         # 3. Crear sesión temporal
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_dir = os.path.join(self.TEMP_DIR, f"session_{session_id}")
-        segments_dir = os.path.join(session_dir, "segments")
-        os.makedirs(segments_dir, exist_ok=True)
+        audio_dir = os.path.join(session_dir, "audio")
+        transcriptions_dir = os.path.join(session_dir, "transcriptions")
+        os.makedirs(audio_dir, exist_ok=True)
+        os.makedirs(transcriptions_dir, exist_ok=True)
         
-        # 4. Transcribir (si se requiere análisis)
-        transcription = None
-        if use_transcription_analysis:
-            transcription = self.transcribe_video(video_path, language)
-            
-            if transcription:
-                # Guardar transcripción
-                trans_path = os.path.join(session_dir, "transcription.json")
-                with open(trans_path, 'w', encoding='utf-8') as f:
-                    json.dump(transcription, f, ensure_ascii=False, indent=2)
+        # 4. Determinar puntos de corte (segmentación fija por ahora)
+        self._log(f"\n✂️ Segmentando video...")
+        self._log(f"   Duración del segmento: {segment_duration}s")
+        self._log(f"   Overlap: {overlap}s")
         
-        # 5. Determinar puntos de corte
-        fixed_cuts = []
-        silence_cuts = []
-        transcription_cuts = []
-        
-        # Cortes fijos
-        segments_fixed = self.segment_by_fixed_duration(
+        segments = self.segment_by_fixed_duration(
             video_duration, segment_duration, overlap
         )
-        fixed_cuts = [s.start_time for s in segments_fixed[1:]]  # Excluir el primero (0)
         
-        # Cortes por silencio
-        if use_silence_detection:
-            silence_cuts = self.segment_by_silence(video_path)
+        self._log(f"   Total de segmentos: {len(segments)}")
         
-        # Cortes por transcripción
-        if transcription:
-            transcription_cuts = self.segment_by_transcription_analysis(
-                transcription, segment_duration
-            )
-        
-        # Combinar puntos de corte
-        cut_points = self.merge_cut_points(
-            fixed_cuts, silence_cuts, transcription_cuts
-        )
-        
-        # Crear segmentos finales
-        segments = self.create_segments_from_cuts(cut_points, video_duration)
-        
-        self._log(f"\n📊 Total de segmentos: {len(segments)}")
-        
-        # 6. Cortar video en segmentos
-        self._log("\n✂️ Cortando video en segmentos...")
+        # 5. Extraer audio de cada segmento
+        self._log(f"\n🎵 Extrayendo audio de segmentos...")
         
         for i, segment in enumerate(segments, 1):
-            self._log(f"   Segmento {i}/{len(segments)}: {segment.start_time:.1f}s - {segment.end_time:.1f}s")
-            self.cut_video_segment(video_path, segment, segments_dir)
+            self._log(f"   [{i}/{len(segments)}] Segmento {segment.segment_id}: {segment.get_time_range_str()}")
+            self.extract_audio_segment(video_path, segment, audio_dir)
         
-        # 7. Guardar metadata
+        # 6. Transcribir cada segmento
+        self._log(f"\n📝 Transcribiendo segmentos con Whisper...")
+        
+        for i, segment in enumerate(segments, 1):
+            self._log(f"   [{i}/{len(segments)}] Transcribiendo segmento {segment.segment_id}...")
+            transcription = self.transcribe_segment(segment, language)
+            
+            if transcription:
+                self._log(f"      ✅ {segment.char_count} caracteres")
+                # Guardar transcripción en archivo .txt
+                self.save_transcription_to_file(segment, transcriptions_dir)
+            else:
+                self._log(f"      ⚠️ Sin transcripción")
+        
+        # 7. Guardar metadata de la sesión
         metadata = {
             "session_id": session_id,
             "original_video": os.path.basename(video_path),
+            "video_path": video_path,
             "duration": video_duration,
             "language": language,
             "segment_duration": segment_duration,
             "overlap": overlap,
-            "use_silence_detection": use_silence_detection,
-            "use_transcription_analysis": use_transcription_analysis,
+            "total_segments": len(segments),
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "segments": [
                 {
                     "id": s.segment_id,
                     "start": s.start_time,
                     "end": s.end_time,
                     "duration": s.duration,
-                    "file": os.path.basename(s.file_path) if s.file_path else None
+                    "time_range": s.get_time_range_str(),
+                    "audio_file": os.path.basename(s.audio_path) if s.audio_path else None,
+                    "transcription_file": os.path.basename(s.transcription_path) if s.transcription_path else None,
+                    "char_count": s.char_count
                 }
                 for s in segments
             ]
@@ -493,16 +613,45 @@ class VideoProcessor:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
         
         self._log("\n✅ Procesamiento completado")
+        self._log(f"   📁 Sesión guardada en: {session_dir}")
+        self._log(f"   🎵 {len(segments)} archivos de audio")
+        self._log(f"   📝 {len(segments)} transcripciones")
+        total_chars = sum(s.char_count for s in segments)
+        self._log(f"   📊 Total de caracteres: {total_chars:,}")
         self._log("="*60 + "\n")
         
         return {
             "success": True,
+            "session_id": session_id,
             "session_dir": session_dir,
-            "segments_dir": segments_dir,
+            "audio_dir": audio_dir,
+            "transcriptions_dir": transcriptions_dir,
             "segments": segments,
-            "transcription": transcription,
-            "metadata": metadata
+            "metadata": metadata,
+            "total_chars": total_chars
         }
+    
+    def play_audio(self, audio_path: str):
+        """
+        Reproduce un archivo de audio.
+        
+        Args:
+            audio_path: Ruta al archivo de audio
+        """
+        if not PLAYSOUND_AVAILABLE:
+            self._log("⚠️ playsound no está instalado. Ejecuta: pip install playsound")
+            return
+        
+        if not os.path.exists(audio_path):
+            self._log(f"❌ Archivo de audio no encontrado: {audio_path}")
+            return
+        
+        try:
+            self._log(f"▶️ Reproduciendo: {os.path.basename(audio_path)}")
+            playsound(audio_path)
+            self._log(f"⏹️ Reproducción finalizada")
+        except Exception as e:
+            self._log(f"❌ Error reproduciendo audio: {e}")
     
     def cleanup_session(self, session_dir: str):
         """Elimina los archivos temporales de una sesión."""

@@ -16,7 +16,7 @@ from flashcards_converter import FlashcardsConverter
 from anki_sync_manager import AnkiSyncManager
 from gemini_flashcard_generator import GeminiFlashcardGenerator
 from config_sets_manager import ConfigSetsManager
-from video_processor import VideoProcessor
+from video_processor import VideoProcessor, VideoSegment, VideoSection
 
 # Archivo para guardar sesiones
 SESSIONS_FILE = "flashcard_sessions.json"
@@ -79,6 +79,40 @@ class ImageSection:
         }
 
 
+class TextSection:
+    """Representa una sección con texto."""
+    
+    def __init__(self, section_id: int):
+        self.section_id = section_id
+        self.title = f"Sección {section_id}"
+        self.text = ""  # Contenido de texto
+    
+    def set_text(self, text: str):
+        """Establece el texto de la sección."""
+        self.text = text
+    
+    def get_text(self) -> str:
+        """Retorna el texto de la sección."""
+        return self.text
+    
+    def clear_text(self):
+        """Limpia el texto."""
+        self.text = ""
+    
+    def get_char_count(self) -> int:
+        """Retorna el número de caracteres."""
+        return len(self.text)
+    
+    def get_status(self) -> dict:
+        """Retorna el estado de la sección."""
+        return {
+            "section_id": self.section_id,
+            "title": self.title,
+            "char_count": len(self.text),
+            "ready": len(self.text.strip()) > 0
+        }
+
+
 class AnkiImportInterface:
     """Interfaz para convertir y importar flashcards a Anki."""
     
@@ -103,7 +137,7 @@ class AnkiImportInterface:
         self.config_manager = ConfigSetsManager()  # Gestor de configuraciones
         self.video_processor = VideoProcessor(log_callback=self.auto_log)  # Procesador de videos
         
-        # Modo actual: "normal", "automatic_images", "automatic_videos"
+        # Modo actual: "normal", "automatic_images", "automatic_videos", "automatic_text"
         self.current_mode = "normal"
         
         # Secciones para modo automático (imágenes)
@@ -112,8 +146,20 @@ class AnkiImportInterface:
         self.section_widgets = {}  # section_id -> widgets dict
         self.thumbnail_refs = {}  # Mantener referencias a thumbnails
         
+        # Secciones para modo automático (texto)
+        self.text_sections = []
+        self.text_section_counter = 0
+        self.text_section_widgets = {}  # section_id -> widgets dict
+        
         # Videos para modo automático (videos)
         self.video_sessions = []  # Lista de sesiones de video procesadas
+        self.current_video_path = None  # Video actualmente cargado
+        self.current_video_segments = []  # Lista de VideoSegment del video actual
+        self.video_sections = []  # Lista de VideoSection para agrupar segmentos
+        self.video_section_counter = 0
+        self.video_segment_widgets = {}  # segment_id -> widgets dict
+        self.video_section_widgets = {}  # section_id -> widgets dict
+        self.current_playing_audio = None  # Referencia al audio en reproducción
         
         # Estado de procesamiento
         self.is_processing = False
@@ -121,6 +167,7 @@ class AnkiImportInterface:
         # Frames principales
         self.normal_frame = None
         self.automatic_images_frame = None
+        self.automatic_text_frame = None
         self.automatic_videos_frame = None
         
         self.setup_ui()
@@ -131,9 +178,10 @@ class AnkiImportInterface:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         
-        # Crear los tres frames
+        # Crear los cuatro frames
         self.setup_normal_mode()
         self.setup_automatic_images_mode()
+        self.setup_automatic_text_mode()
         self.setup_automatic_videos_mode()
         
         # Mostrar modo normal por defecto
@@ -159,9 +207,13 @@ class AnkiImportInterface:
                                           command=self.show_automatic_images_mode)
         self.auto_images_btn.grid(row=0, column=1, sticky="e", padx=5)
         
+        self.auto_text_btn = ttk.Button(header_frame, text="🖊️ Modo Texto",
+                                        command=self.show_automatic_text_mode)
+        self.auto_text_btn.grid(row=0, column=2, sticky="e", padx=5)
+        
         self.auto_videos_btn = ttk.Button(header_frame, text="🎥 Modo Videos",
                                           command=self.show_automatic_videos_mode)
-        self.auto_videos_btn.grid(row=0, column=2, sticky="e", padx=5)
+        self.auto_videos_btn.grid(row=0, column=3, sticky="e", padx=5)
         
         # Frame para el prefijo del deck
         prefix_frame = ttk.Frame(self.normal_frame)
@@ -346,6 +398,101 @@ class AnkiImportInterface:
                                           font=("Segoe UI", 9), foreground="blue")
         self.active_set_label.pack(side="right", padx=10)
     
+    def setup_automatic_text_mode(self):
+        """Configura la vista del modo automático para texto."""
+        self.automatic_text_frame = ttk.Frame(self.root, padding="10")
+        self.automatic_text_frame.columnconfigure(0, weight=3)
+        self.automatic_text_frame.columnconfigure(1, weight=1)
+        self.automatic_text_frame.rowconfigure(1, weight=1)
+        
+        # Header con botón de retroceso
+        header_frame = ttk.Frame(self.automatic_text_frame)
+        header_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        header_frame.columnconfigure(1, weight=1)
+        
+        back_btn = ttk.Button(header_frame, text="← Volver", command=self.show_normal_mode)
+        back_btn.grid(row=0, column=0, sticky="w")
+        
+        title_label = ttk.Label(header_frame, text="🖊️ Modo Automático - Secciones de Texto",
+                               font=("Arial", 14, "bold"))
+        title_label.grid(row=0, column=1, sticky="w", padx=20)
+        
+        # Panel izquierdo: Secciones (scrollable)
+        left_container = ttk.Frame(self.automatic_text_frame)
+        left_container.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
+        left_container.columnconfigure(0, weight=1)
+        left_container.rowconfigure(0, weight=1)
+        
+        # Canvas con scrollbar para secciones
+        self.text_sections_canvas = tk.Canvas(left_container, highlightthickness=0)
+        text_sections_scrollbar = ttk.Scrollbar(left_container, orient="vertical", 
+                                               command=self.text_sections_canvas.yview)
+        
+        self.text_sections_inner_frame = ttk.Frame(self.text_sections_canvas)
+        self.text_sections_inner_frame.columnconfigure(0, weight=1)
+        
+        self.text_sections_canvas.create_window((0, 0), window=self.text_sections_inner_frame, 
+                                               anchor="nw", tags="inner")
+        self.text_sections_canvas.configure(yscrollcommand=text_sections_scrollbar.set)
+        
+        self.text_sections_canvas.grid(row=0, column=0, sticky="nsew")
+        text_sections_scrollbar.grid(row=0, column=1, sticky="ns")
+        
+        # Bind para actualizar scroll region
+        self.text_sections_inner_frame.bind("<Configure>", 
+            lambda e: self.text_sections_canvas.configure(scrollregion=self.text_sections_canvas.bbox("all")))
+        self.text_sections_canvas.bind("<Configure>", 
+            lambda e: self.text_sections_canvas.itemconfig("inner", width=e.width))
+
+        # Panel derecho: Logs
+        right_frame = ttk.LabelFrame(self.automatic_text_frame, text="Logs de Texto", padding="5")
+        right_frame.grid(row=1, column=1, sticky="nsew")
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(0, weight=1)
+        
+        self.text_logs_text = tk.Text(right_frame, width=40, wrap="word")
+        self.text_logs_text.grid(row=0, column=0, sticky="nsew")
+        
+        text_logs_scrollbar = ttk.Scrollbar(right_frame, orient="vertical", 
+                                           command=self.text_logs_text.yview)
+        text_logs_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.text_logs_text.config(yscrollcommand=text_logs_scrollbar.set)
+        
+        # Panel inferior: Botones
+        bottom_frame = ttk.Frame(self.automatic_text_frame)
+        bottom_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        
+        add_text_section_btn = ttk.Button(bottom_frame, text="+ Añadir Sección", 
+                                          command=self.add_text_section)
+        add_text_section_btn.pack(side="left", padx=5)
+        
+        check_text_status_btn = ttk.Button(bottom_frame, text="✓ Chequear Estado",
+                                           command=self.check_text_sections_status)
+        check_text_status_btn.pack(side="left", padx=5)
+        
+        clear_all_text_sections_btn = ttk.Button(bottom_frame, text="🗑 Limpiar Todo",
+                                                 command=self.clear_all_text_sections)
+        clear_all_text_sections_btn.pack(side="left", padx=5)
+        
+        check_api_btn = ttk.Button(bottom_frame, text="🔌 Chequear API",
+                                   command=self.check_gemini_api_text)
+        check_api_btn.pack(side="left", padx=5)
+        
+        # Botón principal de procesamiento
+        self.process_text_sections_btn = ttk.Button(bottom_frame, text="🚀 Procesar Secciones",
+                                                    command=self.process_all_text_sections)
+        self.process_text_sections_btn.pack(side="left", padx=15)
+        
+        # Botón de configuración
+        config_btn = ttk.Button(bottom_frame, text="⚙️ Configuración",
+                               command=self.show_config_dialog)
+        config_btn.pack(side="left", padx=5)
+        
+        # Label del set activo
+        self.text_set_label = ttk.Label(bottom_frame, text=f"Set: {self.config_manager.active_set_name}",
+                                        font=("Segoe UI", 9), foreground="blue")
+        self.text_set_label.pack(side="right", padx=10)
+    
     def setup_automatic_videos_mode(self):
         """Configura la vista del modo automático para videos."""
         self.automatic_videos_frame = ttk.Frame(self.root, padding="10")
@@ -503,6 +650,8 @@ class AnkiImportInterface:
     def show_normal_mode(self):
         """Muestra el modo normal."""
         self.automatic_images_frame.grid_forget()
+        if self.automatic_text_frame:
+            self.automatic_text_frame.grid_forget()
         if self.automatic_videos_frame:
             self.automatic_videos_frame.grid_forget()
         self.normal_frame.grid(row=0, column=0, sticky="nsew")
@@ -511,6 +660,8 @@ class AnkiImportInterface:
     def show_automatic_images_mode(self):
         """Muestra el modo automático de imágenes."""
         self.normal_frame.grid_forget()
+        if self.automatic_text_frame:
+            self.automatic_text_frame.grid_forget()
         if self.automatic_videos_frame:
             self.automatic_videos_frame.grid_forget()
         self.automatic_images_frame.grid(row=0, column=0, sticky="nsew")
@@ -520,10 +671,26 @@ class AnkiImportInterface:
         if not self.sections:
             self.add_section()
     
+    def show_automatic_text_mode(self):
+        """Muestra el modo automático de texto."""
+        self.normal_frame.grid_forget()
+        self.automatic_images_frame.grid_forget()
+        if self.automatic_videos_frame:
+            self.automatic_videos_frame.grid_forget()
+        if self.automatic_text_frame:
+            self.automatic_text_frame.grid(row=0, column=0, sticky="nsew")
+        self.current_mode = "automatic_text"
+        
+        # Añadir una sección inicial si no hay ninguna
+        if not self.text_sections:
+            self.add_text_section()
+    
     def show_automatic_videos_mode(self):
         """Muestra el modo automático de videos."""
         self.normal_frame.grid_forget()
         self.automatic_images_frame.grid_forget()
+        if self.automatic_text_frame:
+            self.automatic_text_frame.grid_forget()
         if self.automatic_videos_frame:
             self.automatic_videos_frame.grid(row=0, column=0, sticky="nsew")
         self.current_mode = "automatic_videos"
@@ -1182,6 +1349,483 @@ class AnkiImportInterface:
         self.video_logs_text.insert("end", f"[{timestamp}] {message}\n")
         self.video_logs_text.see("end")
         self.root.update()
+    
+    def text_log(self, message: str):
+        """Añade un mensaje al log del modo de texto."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.text_logs_text.insert("end", f"[{timestamp}] {message}\n")
+        self.text_logs_text.see("end")
+        self.root.update()
+    
+    # ==================== MÉTODOS DE TEXTO ====================
+    
+    def add_text_section(self):
+        """Añade una nueva sección de texto."""
+        self.text_section_counter += 1
+        section = TextSection(self.text_section_counter)
+        self.text_sections.append(section)
+        
+        self._create_text_section_widget(section)
+        self.text_log(f"📁 Sección {section.section_id} creada")
+    
+    def _create_text_section_widget(self, section: TextSection):
+        """Crea el widget visual para una sección de texto."""
+        section_frame = ttk.LabelFrame(self.text_sections_inner_frame, padding="10")
+        section_frame.grid(row=len(self.text_sections)-1, column=0, sticky="ew", pady=5, padx=5)
+        section_frame.columnconfigure(0, weight=1)
+        
+        # Header de la sección con título editable
+        header_frame = ttk.Frame(section_frame)
+        header_frame.grid(row=0, column=0, sticky="ew")
+        header_frame.columnconfigure(1, weight=1)
+        
+        # Título (label por defecto, entry al editar)
+        title_var = tk.StringVar(value=section.title)
+        title_label = ttk.Label(header_frame, text=section.title, font=("Arial", 11, "bold"))
+        title_label.grid(row=0, column=0, sticky="w")
+        
+        title_entry = ttk.Entry(header_frame, textvariable=title_var, width=20)
+        
+        # Botones de edición
+        edit_btn = ttk.Button(header_frame, text="✏", width=3)
+        edit_btn.grid(row=0, column=1, sticky="w", padx=5)
+        
+        confirm_btn = ttk.Button(header_frame, text="✓", width=3)
+
+        def start_edit():
+            title_label.grid_forget()
+            edit_btn.grid_forget()
+            title_entry.grid(row=0, column=0, sticky="w")
+            confirm_btn.grid(row=0, column=1, sticky="w", padx=5)
+            title_entry.focus()
+        
+        def confirm_edit():
+            new_title = title_var.get().strip() or f"Sección {section.section_id}"
+            section.title = new_title
+            title_label.config(text=new_title)
+            title_entry.grid_forget()
+            confirm_btn.grid_forget()
+            title_label.grid(row=0, column=0, sticky="w")
+            edit_btn.grid(row=0, column=1, sticky="w", padx=5)
+            self.text_log(f"📝 Sección {section.section_id} renombrada a: {new_title}")
+        
+        edit_btn.config(command=start_edit)
+        confirm_btn.config(command=confirm_edit)
+        title_entry.bind("<Return>", lambda e: confirm_edit())
+        
+        # Botón pegar desde portapapeles
+        paste_btn = ttk.Button(header_frame, text="📋 Pegar", width=8,
+                               command=lambda: self.paste_text_from_clipboard(section))
+        paste_btn.grid(row=0, column=2, sticky="w", padx=5)
+        
+        # Botón eliminar sección
+        delete_btn = ttk.Button(header_frame, text="🗑 Eliminar", 
+                               command=lambda: self.delete_text_section(section))
+        delete_btn.grid(row=0, column=3, sticky="e", padx=5)
+        
+        # Frame para indicadores de estado de los tipos de flashcards
+        status_frame = ttk.Frame(section_frame)
+        status_frame.grid(row=1, column=0, sticky="w", pady=(5, 0))
+        
+        # Crear los indicadores según el set activo
+        status_labels = {}
+        
+        # Obtener tipos activos del config manager
+        active_config = self.config_manager.get_active_set()
+        active_types = active_config.get("active_types", {})
+        
+        # Iconos para cada tipo
+        type_icons = {
+            "basic": ("📝", "Basic"),
+            "multiple_choice": ("🔘", "Multiple"),
+            "cloze": ("🔲", "Cloze"),
+            "vocabulary": ("🔤", "Vocab"),
+            "level_1_cloze": ("1️⃣", "L1-Cloze"),
+            "level_2_relations": ("2️⃣", "L2-Rel"),
+            "level_3_application": ("3️⃣", "L3-App"),
+            "level_4_analysis": ("4️⃣", "L4-Anal")
+        }
+        
+        # Filtrar solo los tipos activos
+        card_types_icons = [
+            (card_type, *type_icons.get(card_type, ("❓", card_type[:6])))
+            for card_type, is_active in active_types.items() if is_active
+        ]
+        
+        for idx, (card_type, icon, label) in enumerate(card_types_icons):
+            type_frame = ttk.Frame(status_frame)
+            type_frame.grid(row=0, column=idx, padx=(0, 15))
+            
+            # Icono del tipo
+            icon_label = ttk.Label(type_frame, text=icon, font=("Segoe UI", 9))
+            icon_label.grid(row=0, column=0)
+            
+            # Estado (⬜ inicial, ✅ éxito, ❌ fallo)
+            state_label = tk.Label(type_frame, text="⬜", font=("Segoe UI", 9), fg="gray")
+            state_label.grid(row=0, column=1, padx=2)
+            
+            # Contador (vacío inicialmente)
+            count_label = ttk.Label(type_frame, text="", font=("Segoe UI", 8))
+            count_label.grid(row=0, column=2)
+            
+            status_labels[card_type] = {
+                "state": state_label,
+                "count": count_label
+            }
+        
+        # Text widget para el contenido
+        text_frame = ttk.Frame(section_frame)
+        text_frame.grid(row=2, column=0, sticky="nsew", pady=10)
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
+        
+        text_widget = tk.Text(text_frame, height=10, wrap="word", font=("Consolas", 10))
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        
+        text_scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        text_scrollbar.grid(row=0, column=1, sticky="ns")
+        text_widget.config(yscrollcommand=text_scrollbar.set)
+        
+        # Bind para actualizar contador de caracteres
+        def update_char_count(event=None):
+            content = text_widget.get("1.0", "end-1c")
+            section.set_text(content)
+            char_count = len(content)
+            info_label.config(text=f"{char_count:,} caracteres")
+        
+        text_widget.bind("<KeyRelease>", update_char_count)
+        
+        # Info de la sección
+        info_label = ttk.Label(section_frame, text="0 caracteres", foreground="gray")
+        info_label.grid(row=3, column=0, sticky="w", pady=(5, 0))
+        
+        # Guardar referencias
+        self.text_section_widgets[section.section_id] = {
+            "frame": section_frame,
+            "title_label": title_label,
+            "title_var": title_var,
+            "text_widget": text_widget,
+            "info_label": info_label,
+            "status_labels": status_labels
+        }
+    
+    def paste_text_from_clipboard(self, section: TextSection):
+        """Pega texto desde el portapapeles."""
+        try:
+            clipboard_text = self.root.clipboard_get()
+            
+            if not clipboard_text or not clipboard_text.strip():
+                self.text_log("⚠️ El portapapeles está vacío")
+                messagebox.showwarning("Portapapeles vacío", 
+                                      "No hay texto en el portapapeles.")
+                return
+            
+            # Obtener el text widget de la sección
+            widgets = self.text_section_widgets.get(section.section_id)
+            if widgets:
+                text_widget = widgets["text_widget"]
+                # Insertar al final del texto existente
+                text_widget.insert("end", clipboard_text)
+                # Actualizar contador
+                content = text_widget.get("1.0", "end-1c")
+                section.set_text(content)
+                widgets["info_label"].config(text=f"{len(content):,} caracteres")
+                
+                self.text_log(f"📋 Texto pegado en {section.title} ({len(clipboard_text)} caracteres)")
+        
+        except tk.TclError:
+            self.text_log("⚠️ No se pudo acceder al portapapeles")
+            messagebox.showwarning("Error", "No se pudo acceder al portapapeles.")
+        except Exception as e:
+            self.text_log(f"❌ Error al pegar: {e}")
+            messagebox.showerror("Error", f"No se pudo pegar el texto:\n{str(e)}")
+    
+    def delete_text_section(self, section: TextSection):
+        """Elimina una sección de texto."""
+        if len(self.text_sections) <= 1:
+            messagebox.showwarning("Aviso", "Debe haber al menos una sección")
+            return
+        
+        if messagebox.askyesno("Confirmar", f"¿Eliminar {section.title}?"):
+            # Eliminar widget
+            widgets = self.text_section_widgets.get(section.section_id)
+            if widgets:
+                widgets["frame"].destroy()
+                del self.text_section_widgets[section.section_id]
+            
+            # Eliminar sección
+            self.text_sections.remove(section)
+            self.text_log(f"🗑 Sección eliminada: {section.title}")
+            
+            # Reorganizar grid
+            self._reorganize_text_sections()
+    
+    def _reorganize_text_sections(self):
+        """Reorganiza las secciones de texto en el grid."""
+        for idx, section in enumerate(self.text_sections):
+            widgets = self.text_section_widgets.get(section.section_id)
+            if widgets:
+                widgets["frame"].grid(row=idx, column=0, sticky="ew", pady=5, padx=5)
+    
+    def check_text_sections_status(self):
+        """Chequea el estado de todas las secciones de texto."""
+        self.text_log("\n" + "="*50)
+        self.text_log("📊 CHEQUEO DE ESTADO DE SECCIONES")
+        self.text_log("="*50)
+        
+        total_chars = 0
+        ready_sections = 0
+        
+        for section in self.text_sections:
+            status = section.get_status()
+            self.text_log(f"\n📁 {section.title}:")
+            self.text_log(f"   • Caracteres: {status['char_count']:,}")
+            
+            if status['ready']:
+                self.text_log(f"   • Estado: ✅ LISTO para envío")
+                ready_sections += 1
+            else:
+                self.text_log(f"   • Estado: ⚠️ SIN TEXTO")
+            
+            total_chars += status['char_count']
+        
+        self.text_log(f"\n{'='*50}")
+        self.text_log(f"📈 RESUMEN:")
+        self.text_log(f"   • Total secciones: {len(self.text_sections)}")
+        self.text_log(f"   • Secciones listas: {ready_sections}/{len(self.text_sections)}")
+        self.text_log(f"   • Total caracteres: {total_chars:,}")
+        
+        if ready_sections == len(self.text_sections) and total_chars > 0:
+            self.text_log(f"\n✅ TODOS LOS LOTES LISTOS PARA ENVÍO")
+        elif total_chars == 0:
+            self.text_log(f"\n⚠️ NO HAY TEXTO CARGADO")
+        else:
+            self.text_log(f"\n⚠️ ALGUNOS LOTES NO ESTÁN LISTOS")
+        
+        self.text_log("="*50 + "\n")
+    
+    def clear_all_text_sections(self):
+        """Limpia todas las secciones de texto."""
+        if messagebox.askyesno("Confirmar", "¿Eliminar todas las secciones de texto?"):
+            # Eliminar todos los widgets
+            for section_id, widgets in list(self.text_section_widgets.items()):
+                widgets["frame"].destroy()
+            
+            self.text_section_widgets.clear()
+            self.text_sections.clear()
+            self.text_section_counter = 0
+            
+            # Añadir una sección inicial
+            self.add_text_section()
+            self.text_log("🗑 Todas las secciones eliminadas")
+    
+    def check_gemini_api_text(self):
+        """Chequea la conexión con la API de Gemini (para modo texto)."""
+        def check():
+            self.text_log("\n" + "="*50)
+            self.text_log("🔌 CHEQUEANDO TODAS LAS APIs DE GEMINI...")
+            self.text_log("="*50)
+            
+            try:
+                # Inicializar generador si no existe
+                if not self.flashcard_generator:
+                    self.flashcard_generator = GeminiFlashcardGenerator(log_callback=self.text_log)
+                
+                # Verificar las 4 APIs
+                all_ok = True
+                for i in range(1, 5):
+                    if not self.flashcard_generator.check_api_connection(i):
+                        all_ok = False
+                
+                if all_ok:
+                    self.text_log(f"\n✅ TODAS LAS APIs CONECTADAS CORRECTAMENTE")
+                    self.text_log(f"   Modelo: {self.flashcard_generator.model_name}")
+                else:
+                    self.text_log(f"\n⚠️ ALGUNAS APIs NO ESTÁN DISPONIBLES")
+                
+            except ImportError:
+                self.text_log(f"\n❌ ERROR: Módulo google-generativeai no instalado")
+                self.text_log(f"   Ejecuta: pip install google-generativeai")
+            except Exception as e:
+                self.text_log(f"\n❌ ERROR DE CONEXIÓN:")
+                self.text_log(f"   {str(e)}")
+            
+            self.text_log("="*50 + "\n")
+        
+        thread = threading.Thread(target=check, daemon=True)
+        thread.start()
+    
+    def process_all_text_sections(self):
+        """Procesa todas las secciones de texto."""
+        # Validar que hay secciones con texto
+        sections_with_text = [s for s in self.text_sections if s.get_text().strip()]
+        
+        if not sections_with_text:
+            messagebox.showwarning("Sin texto", "No hay secciones con texto para procesar.")
+            return
+        
+        if self.is_processing:
+            messagebox.showwarning("En proceso", "Ya hay un procesamiento en curso.")
+            return
+        
+        # Confirmar
+        total_chars = sum(len(s.get_text()) for s in sections_with_text)
+        msg = f"¿Procesar {len(sections_with_text)} sección(es) con {total_chars:,} caracteres?\n\n"
+        msg += "Esto realizará:\n"
+        msg += "1. Generación SECUENCIAL de flashcards con Gemini\n"
+        msg += "2. Importación automática a Anki\n\n"
+        msg += "Nota: El procesamiento es secuencial (API1→API2→API3→API4)."
+        
+        if not messagebox.askyesno("Confirmar procesamiento", msg):
+            return
+        
+        # Resetear indicadores de estado
+        self._reset_all_text_status_indicators()
+        
+        # Iniciar procesamiento en thread
+        self.is_processing = True
+        self.process_text_sections_btn.config(state="disabled", text="⏳ Procesando...")
+        
+        thread = threading.Thread(target=self._process_text_sections_thread, daemon=True)
+        thread.start()
+    
+    def _process_text_sections_thread(self):
+        """Thread de procesamiento de secciones de texto."""
+        try:
+            # Obtener configuración activa
+            active_config = self.config_manager.get_active_set()
+            
+            # Inicializar o actualizar generador con la configuración
+            if not self.flashcard_generator:
+                self.flashcard_generator = GeminiFlashcardGenerator(
+                    log_callback=self.text_log,
+                    config_set=active_config
+                )
+            else:
+                self.flashcard_generator.update_config(active_config)
+            
+            self.text_log(f"📋 Usando configuración: {active_config.get('name', 'Por Defecto')}")
+            self.text_log(f"   Modelo: {self.flashcard_generator.model_name}")
+            self.text_log(f"   Tipos activos: {[k for k, v in self.flashcard_generator.active_types.items() if v]}")
+            self.text_log(f"   Modo: SECUENCIAL (API1→API2→API3→API4)")
+            
+            total_flashcards = 0
+            
+            # Procesar cada sección
+            for idx, section in enumerate(self.text_sections, 1):
+                texto = section.get_text().strip()
+                if not texto:
+                    continue
+                
+                self.text_log(f"\n{'='*60}")
+                self.text_log(f"📁 PROCESANDO SECCIÓN {idx}/{len(self.text_sections)}: {section.title}")
+                self.text_log(f"{'='*60}")
+                self.text_log(f"   📝 Caracteres: {len(texto):,}")
+                
+                # Generar flashcards SECUENCIALMENTE
+                self.text_log(f"\n🤖 GENERACIÓN SECUENCIAL DE FLASHCARDS")
+                results = self.flashcard_generator.generate_all_flashcards_sequential(texto)
+                
+                # Procesar resultados
+                for card_type, result in results.items():
+                    if result.get("success"):
+                        content = result.get("content", "")
+                        
+                        # Convertir a flashcards
+                        flashcards = self.converter.convert(content, card_type)
+                        
+                        if flashcards:
+                            # Parsear TSV a lista de flashcards
+                            flashcard_list = []
+                            for line in flashcards.strip().split('\n'):
+                                if '\t' in line:
+                                    front, back = line.split('\t', 1)
+                                    flashcard_list.append({"front": front.strip(), "back": back.strip()})
+                            
+                            if flashcard_list:
+                                # Importar a Anki
+                                deck_name = f"Flashcards - {section.title} - {card_type}"
+                                success, msg, count = self.anki_manager.sync_flashcards_to_anki(
+                                    deck_name, flashcard_list, card_type
+                                )
+                                
+                                if success:
+                                    self.text_log(f"   ✅ {card_type}: {count} flashcards → {deck_name}")
+                                    total_flashcards += count
+                                    # Actualizar indicador visual
+                                    self.root.after(0, lambda sid=section.section_id, ct=card_type, c=count: 
+                                                  self._update_text_section_status(sid, ct, True, c))
+                                else:
+                                    self.text_log(f"   ❌ {card_type}: {msg}")
+                                    self.root.after(0, lambda sid=section.section_id, ct=card_type: 
+                                                  self._update_text_section_status(sid, ct, False, 0))
+                            else:
+                                self.text_log(f"   ⚠️ {card_type}: No se pudieron parsear flashcards")
+                                self.root.after(0, lambda sid=section.section_id, ct=card_type: 
+                                              self._update_text_section_status(sid, ct, False, 0))
+                        else:
+                            self.text_log(f"   ⚠️ {card_type}: No se pudieron parsear flashcards")
+                            self.root.after(0, lambda sid=section.section_id, ct=card_type: 
+                                          self._update_text_section_status(sid, ct, False, 0))
+                    else:
+                        self.text_log(f"   ❌ {card_type}: {result.get('error')}")
+                        self.root.after(0, lambda sid=section.section_id, ct=card_type: 
+                                      self._update_text_section_status(sid, ct, False, 0))
+            
+            self.text_log(f"\n{'='*60}")
+            self.text_log(f"✅ PROCESAMIENTO COMPLETADO")
+            self.text_log(f"   • Secciones procesadas: {len([s for s in self.text_sections if s.get_text().strip()])}")
+            self.text_log(f"   • Total flashcards importadas: {total_flashcards}")
+            self.text_log("="*60 + "\n")
+            
+            # Mostrar popup
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Procesamiento completado",
+                f"Secciones procesadas: {len([s for s in self.text_sections if s.get_text().strip()])}\n"
+                f"Total flashcards importadas: {total_flashcards}"
+            ))
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.text_log(f"\n❌ ERROR CRÍTICO: {error_msg}")
+            self.root.after(0, lambda msg=error_msg: messagebox.showerror(
+                "Error", f"Error durante el procesamiento:\n{msg}"))
+        
+        finally:
+            self.is_processing = False
+            self.root.after(0, lambda: self.process_text_sections_btn.config(
+                state="normal", text="🚀 Procesar Secciones"
+            ))
+    
+    def _update_text_section_status(self, section_id: int, card_type: str, success: bool, count: int):
+        """Actualiza el indicador visual de estado de una sección de texto."""
+        widgets = self.text_section_widgets.get(section_id)
+        if not widgets or "status_labels" not in widgets:
+            return
+        
+        status_labels = widgets["status_labels"]
+        if card_type not in status_labels:
+            return
+        
+        state_label = status_labels[card_type]["state"]
+        count_label = status_labels[card_type]["count"]
+        
+        if success:
+            state_label.config(text="✅", fg="green")
+            count_label.config(text=str(count))
+        else:
+            state_label.config(text="❌", fg="red")
+            count_label.config(text="")
+    
+    def _reset_all_text_status_indicators(self):
+        """Resetea todos los indicadores de estado de texto a su valor inicial (⬜)."""
+        for section_id, widgets in self.text_section_widgets.items():
+            if "status_labels" not in widgets:
+                continue
+            
+            for card_type, labels in widgets["status_labels"].items():
+                labels["state"].config(text="⬜", fg="gray")
+                labels["count"].config(text="")
     
     # ==================== MÉTODOS DE VIDEOS ====================
     
