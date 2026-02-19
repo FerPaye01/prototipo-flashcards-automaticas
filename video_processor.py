@@ -19,12 +19,19 @@ try:
 except ImportError:
     WHISPER_AVAILABLE = False
 
-# FFmpeg para procesamiento de video
+# audio_extract para extracción de audio
 try:
-    import ffmpeg
-    FFMPEG_AVAILABLE = True
+    from audio_extract import extract_audio
+    AUDIO_EXTRACT_AVAILABLE = True
 except ImportError:
-    FFMPEG_AVAILABLE = False
+    AUDIO_EXTRACT_AVAILABLE = False
+
+# imageio para obtener duración del video
+try:
+    import imageio
+    IMAGEIO_AVAILABLE = True
+except ImportError:
+    IMAGEIO_AVAILABLE = False
 
 # playsound para reproducción
 try:
@@ -146,10 +153,16 @@ class VideoProcessor:
             size_mb = size / (1024 * 1024)
             return False, f"Archivo muy grande ({size_mb:.1f} MB). Máximo: 2GB"
         
-        # Verificar duración con ffprobe
+        # Verificar duración con imageio
         try:
-            probe = ffmpeg.probe(video_path)
-            duration = float(probe['format']['duration'])
+            if IMAGEIO_AVAILABLE:
+                reader = imageio.get_reader(video_path)
+                duration = reader.get_meta_data()['duration']
+                reader.close()
+            else:
+                # Fallback: estimar duración por tamaño (menos preciso)
+                duration = size / (1024 * 1024) * 60  # ~1 minuto por MB
+                self._log("⚠️ Usando estimación de duración (imageio no disponible)")
             
             if duration > self.MAX_DURATION:
                 duration_min = duration / 60
@@ -411,18 +424,32 @@ class VideoProcessor:
             f"segment_{segment.segment_id:03d}.mp3"
         )
         
+        if not AUDIO_EXTRACT_AVAILABLE:
+            self._log(f"❌ audio_extract no está instalado. Ejecuta: pip install audio-extract")
+            return None
+        
         try:
-            # Usar ffmpeg para extraer audio
-            (
-                ffmpeg
-                .input(video_path, ss=segment.start_time, t=segment.duration)
-                .output(output_path, acodec='libmp3lame', audio_bitrate='128k', loglevel='error')
-                .overwrite_output()
-                .run()
+            # Calcular tiempo de inicio en formato HH:MM:SS
+            start_time = str(int(segment.start_time // 3600)).zfill(2) + ":" + \
+                        str(int((segment.start_time % 3600) // 60)).zfill(2) + ":" + \
+                        str(int(segment.start_time % 60)).zfill(2)
+            
+            # Usar audio_extract para extraer el segmento de audio
+            extract_audio(
+                input_path=video_path,
+                output_path=output_path,
+                output_format='mp3',
+                start_time=start_time,
+                duration=segment.duration,
+                overwrite=True
             )
             
-            segment.audio_path = output_path
-            return output_path
+            if os.path.exists(output_path):
+                segment.audio_path = output_path
+                return output_path
+            else:
+                self._log(f"❌ No se pudo extraer audio del segmento {segment.segment_id}")
+                return None
         
         except Exception as e:
             self._log(f"❌ Error extrayendo audio del segmento {segment.segment_id}: {e}")
@@ -539,8 +566,17 @@ class VideoProcessor:
         self._log(f"✅ {msg}")
         
         # 2. Obtener duración
-        probe = ffmpeg.probe(video_path)
-        video_duration = float(probe['format']['duration'])
+        try:
+            if IMAGEIO_AVAILABLE:
+                reader = imageio.get_reader(video_path)
+                video_duration = reader.get_meta_data()['duration']
+                reader.close()
+            else:
+                # Fallback: estimar duración por tamaño
+                video_duration = os.path.getsize(video_path) / (1024 * 1024) * 60
+                self._log("⚠️ Usando estimación de duración")
+        except Exception as e:
+            return {"success": False, "error": f"No se pudo obtener duración del video: {e}"}
         
         # 3. Crear sesión temporal
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
