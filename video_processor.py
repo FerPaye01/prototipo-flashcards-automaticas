@@ -108,10 +108,10 @@ class VideoSection:
 class VideoProcessor:
     """Procesador de videos con segmentación inteligente."""
     
-    # Límites
-    MAX_DURATION = 7200  # 2 horas en segundos
-    MAX_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
-    SUPPORTED_FORMATS = ('.mp4', '.avi', '.mov', '.mkv')
+    # Límites (temporalmente aumentados o eliminados)
+    MAX_DURATION = 36000  # 10 horas en segundos (aumentado)
+    MAX_SIZE = 10 * 1024 * 1024 * 1024  # 10GB (aumentado)
+    SUPPORTED_FORMATS = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.mov')
     
     # Directorio temporal
     TEMP_DIR = "temp_videos"
@@ -149,29 +149,75 @@ class VideoProcessor:
         
         # Verificar tamaño
         size = os.path.getsize(video_path)
+        size_mb = size / (1024 * 1024)
         if size > self.MAX_SIZE:
-            size_mb = size / (1024 * 1024)
-            return False, f"Archivo muy grande ({size_mb:.1f} MB). Máximo: 2GB"
+            return False, f"Archivo muy grande ({size_mb:.1f} MB). Máximo: {self.MAX_SIZE / (1024*1024*1024):.0f}GB"
         
-        # Verificar duración con imageio
-        try:
-            if IMAGEIO_AVAILABLE:
+        # Obtener duración real del video
+        duration = self._get_video_duration(video_path)
+        
+        if duration is None:
+            # Si no podemos obtener la duración, asumir que es válido
+            self._log("⚠️ No se pudo obtener duración del video, procesando de todos modos")
+            return True, f"Video válido (tamaño: {size_mb:.1f} MB)"
+        
+        duration_min = duration / 60
+        
+        if duration > self.MAX_DURATION:
+            return False, f"Video muy largo ({duration_min:.1f} min). Máximo: {self.MAX_DURATION / 3600:.0f} horas"
+        
+        return True, f"Video válido ({duration_min:.1f} min, {size_mb:.1f} MB)"
+    
+    def _get_video_duration(self, video_path: str) -> Optional[float]:
+        """
+        Obtiene la duración real del video usando múltiples métodos.
+        
+        Returns:
+            Duración en segundos o None si no se puede obtener
+        """
+        # Método 1: Usar imageio
+        if IMAGEIO_AVAILABLE:
+            try:
                 reader = imageio.get_reader(video_path)
-                duration = reader.get_meta_data()['duration']
+                duration = reader.get_meta_data().get('duration', 0)
                 reader.close()
-            else:
-                # Fallback: estimar duración por tamaño (menos preciso)
-                duration = size / (1024 * 1024) * 60  # ~1 minuto por MB
-                self._log("⚠️ Usando estimación de duración (imageio no disponible)")
-            
-            if duration > self.MAX_DURATION:
-                duration_min = duration / 60
-                return False, f"Video muy largo ({duration_min:.1f} min). Máximo: 2 horas"
-            
-            return True, f"Video válido ({duration/60:.1f} min, {size/(1024*1024):.1f} MB)"
+                if duration > 0:
+                    return duration
+            except Exception as e:
+                self._log(f"⚠️ imageio no pudo leer duración: {e}")
         
-        except Exception as e:
-            return False, f"Error al leer video: {e}"
+        # Método 2: Usar audio_extract con el video completo
+        if AUDIO_EXTRACT_AVAILABLE:
+            try:
+                import tempfile
+                import wave
+                
+                # Extraer audio completo para obtener duración
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                    tmp_path = tmp.name
+                
+                extract_audio(
+                    input_path=video_path,
+                    output_path=tmp_path,
+                    output_format='wav',
+                    overwrite=True
+                )
+                
+                if os.path.exists(tmp_path):
+                    with wave.open(tmp_path, 'rb') as wav_file:
+                        frames = wav_file.getnframes()
+                        rate = wav_file.getframerate()
+                        duration = frames / rate
+                    os.remove(tmp_path)
+                    return duration
+            except Exception as e:
+                self._log(f"⚠️ audio_extract no pudo obtener duración: {e}")
+        
+        # Método 3: Estimar por tamaño (fallback)
+        size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        estimated_duration = size_mb * 60  # ~1 minuto por MB
+        self._log(f"⚠️ Usando duración estimada: {estimated_duration/60:.1f} min")
+        return estimated_duration
     
     def load_whisper_model(self, model_size: str = "base"):
         """
