@@ -567,7 +567,7 @@ Click en "📋 Importar Pendientes (X)"
 #### Configuración de Segmentación
 
 **Duración de Segmento**
-- Rango: 1-10 minutos
+- Rango: Libre (mínimo 0.1 minutos)
 - Default: 3 minutos
 - Uso: Videos cortos → segmentos cortos, Videos largos → segmentos largos
 

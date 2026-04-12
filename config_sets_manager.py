@@ -8,7 +8,10 @@ import json
 from typing import Dict, List, Optional
 from datetime import datetime
 
-CONFIG_SETS_FILE = "flashcard_config_sets.json"
+# Carpeta maestra para archivos generados
+MASTER_FOLDER = "Flashcards Programa"
+
+CONFIG_SETS_FILE = os.path.join(MASTER_FOLDER, "flashcard_config_sets.json")
 
 DEFAULT_PROMPTS = {
 
@@ -175,7 +178,7 @@ DEFAULT_PROMPTS2 = {
     "level_1_cloze": """Rol: Editor de Diseño Instruccional experto en minería de textos y Anki.
 
 Objetivos:
-Analizar el [Input_Texto_OCR] completo. Tu tarea es identificar los 10-15 conceptos técnicos, datos fácticos, métricas o definiciones más críticas del texto y convertirlos en tarjetas de memorización "Cloze" (huecos).
+Analizar el [Input_Texto_OCR] completo. Tu tarea es identificar TODOS los conceptos técnicos, datos fácticos, métricas o definiciones más críticas del texto y convertirlos en tarjetas de memorización "Cloze" (huecos).
 
 Entradas:
 Input_Texto_OCR: {texto_ocr}
@@ -269,7 +272,7 @@ DEFAULT_CONFIG_SET = {
     "name": "Por Defecto",
     "description": "Configuración estándar con los 4 tipos de flashcards",
     "model": "gemini-3-flash-preview",
-    "wait_time": 80,
+    "wait_time": 60,
     "replace_mode": False, 
     "active_types": {
         "basic": True,

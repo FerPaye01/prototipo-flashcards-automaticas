@@ -63,3 +63,4 @@ tkinterdnd2==0.3.0
 
 # OCR fallback (optional)
 pytesseract==0.3.10
+python-docx==1.1.2

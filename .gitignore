@@ -35,3 +35,15 @@ hallazgos .html
 
 # Carpeta de Kiro
 .kiro/
+
+# Binarios y archivos pesados
+ffmpeg.exe
+*.mp4
+*.mp3
+*.txt
+
+# Directorios temporales y modelos
+temp_videos/
+test_videos/
+whisper_models/
+flashcard_text_sessions.json

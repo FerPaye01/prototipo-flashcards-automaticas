@@ -12,14 +12,26 @@ import json
 from datetime import datetime
 from PIL import Image, ImageTk
 import io
+import math
 from flashcards_converter import FlashcardsConverter
+from document_processor import DocumentProcessor
 from anki_sync_manager import AnkiSyncManager
-from gemini_flashcard_generator import GeminiFlashcardGenerator
 from config_sets_manager import ConfigSetsManager
-from video_processor import VideoProcessor, VideoSegment, VideoSection
+from video_processor import VideoProcessor, VideoSection, VideoSegment
+import tempfile
+from gemini_flashcard_generator import GeminiFlashcardGenerator
+
+
+# Carpeta maestra para archivos generados
+MASTER_FOLDER = "Flashcards Programa"
+
+# Asegurar que la carpeta maestra exista
+if not os.path.exists(MASTER_FOLDER):
+    os.makedirs(MASTER_FOLDER, exist_ok=True)
 
 # Archivo para guardar sesiones
-SESSIONS_FILE = "flashcard_sessions.json"
+SESSIONS_FILE = os.path.join(MASTER_FOLDER, "flashcard_sessions.json")
+TEXT_SESSIONS_FILE = os.path.join(MASTER_FOLDER, "flashcard_text_sessions.json")
 
 
 class ImageSection:
@@ -135,10 +147,12 @@ class AnkiImportInterface:
         self.anki_manager = AnkiSyncManager()
         self.flashcard_generator = None  # Se inicializa bajo demanda
         self.config_manager = ConfigSetsManager()  # Gestor de configuraciones
-        self.video_processor = VideoProcessor(log_callback=self.auto_log)  # Procesador de videos
+        self.video_processor = VideoProcessor(log_callback=self.video_log)  # Procesador de videos
         
-        # Modo actual: "normal", "automatic_images", "automatic_videos", "automatic_text"
+        # Modo actual: "normal", "automatic_images", "automatic_videos", "automatic_text", "automatic_books"
         self.current_mode = "normal"
+        
+        self.document_processor = DocumentProcessor(log_callback=self.text_log)  # Para PDF/Word
         
         # Secciones para modo automático (imágenes)
         self.sections = []
@@ -146,10 +160,18 @@ class AnkiImportInterface:
         self.section_widgets = {}  # section_id -> widgets dict
         self.thumbnail_refs = {}  # Mantener referencias a thumbnails
         
+        # Jerarquía compartida para modos automáticos
+        self.great_grandparent_deck = tk.StringVar(value="")
+        self.grandparent_deck = tk.StringVar(value="")
+        self.parent_prefix = tk.StringVar(value="Sección")
+        self.hierarchy_counter = 0  # Contador global para el sufijo
+
+        
         # Secciones para modo automático (texto)
         self.text_sections = []
         self.text_section_counter = 0
         self.text_section_widgets = {}  # section_id -> widgets dict
+        self.use_ai_structuring_text = tk.BooleanVar(value=False)
         
         # Videos para modo automático (videos)
         self.video_sessions = []  # Lista de sesiones de video procesadas
@@ -169,6 +191,7 @@ class AnkiImportInterface:
         self.automatic_images_frame = None
         self.automatic_text_frame = None
         self.automatic_videos_frame = None
+        self.automatic_books_frame = None
         
         self.setup_ui()
         self.check_anki_status()
@@ -183,10 +206,107 @@ class AnkiImportInterface:
         self.setup_automatic_images_mode()
         self.setup_automatic_text_mode()
         self.setup_automatic_videos_mode()
+        self.setup_automatic_books_mode()
         
         # Mostrar modo normal por defecto
         self.show_normal_mode()
+        
+    def apply_hierarchy_names(self):
+        """Aplica dinámicamente el prefijo padre a todas las secciones del modo actual y bloquea la edición."""
+        prefix = self.parent_prefix.get().strip()
+        if not prefix:
+            messagebox.showwarning("Falta prefijo", "Escribe un 'Prefijo Padre' para poder aplicar los nombres.")
+            return
+            
+        counter = 1
+        
+        # Modo Imágenes
+        if self.current_mode == "automatic_images":
+            for section in self.sections:
+                new_title = f"{prefix} {counter}"
+                section.title = new_title
+                widgets = self.section_widgets.get(section.section_id)
+                if widgets:
+                    widgets["title_var"].set(new_title)
+                    widgets["title_label"].config(text=new_title)
+                    # Quitar botón de edición si existe en el header (índice 1)
+                    header_frame = widgets["frame"].winfo_children()[0]
+                    children = header_frame.winfo_children()
+                    if len(children) > 1 and isinstance(children[1], ttk.Button) and children[1].cget("text") == "✏":
+                        children[1].grid_forget()
+                counter += 1
+            self.hierarchy_counter = len(self.sections)
+            self.auto_log(f"🔄 Secciones renombradas dinámicamente a '{prefix}'")
+            
+        # Modo Texto
+        elif self.current_mode == "automatic_text":
+            for section in self.text_sections:
+                new_title = f"{prefix} {counter}"
+                section.title = new_title
+                widgets = self.text_section_widgets.get(section.section_id)
+                if widgets:
+                    widgets["title_var"].set(new_title)
+                    widgets["title_label"].config(text=new_title)
+                    header_frame = widgets["frame"].winfo_children()[0]
+                    children = header_frame.winfo_children()
+                    if len(children) > 1 and isinstance(children[1], ttk.Button) and children[1].cget("text") == "✏":
+                        children[1].grid_forget()
+                counter += 1
+            self.hierarchy_counter = len(self.text_sections)
+            self.text_log(f"🔄 Secciones de texto renombradas dinámicamente a '{prefix}'")
+            
+        # Modo Videos
+        elif self.current_mode == "automatic_videos":
+            for section in self.video_sections:
+                new_title = f"{prefix} {counter}"
+                section.title = new_title
+                widgets = self.video_section_widgets.get(section.section_id)
+                if widgets:
+                    # En video, el label es directo
+                    if "title_label" in widgets:
+                        widgets["title_label"].config(text=new_title)
+                counter += 1
+            self.hierarchy_counter = len(self.video_sections)
+            self.video_log(f"🔄 Secciones de video renombradas dinámicamente a '{prefix}'")
     
+    def _create_hierarchy_config_frame(self, parent_frame):
+        """Crea el frame de configuración de jerarquía (Mazo Bisabuelo, Mazo Abuelo y Prefijo Padre)."""
+        hierarchy_frame = ttk.LabelFrame(parent_frame, text="Jerarquía de Mazos (Anki)", padding="5")
+        hierarchy_frame.columnconfigure(1, weight=1)
+        hierarchy_frame.columnconfigure(3, weight=1)
+        hierarchy_frame.columnconfigure(5, weight=1)
+        
+        # Mazo Bisabuelo
+        ttk.Label(hierarchy_frame, text="Mazo Bisabuelo:").grid(row=0, column=0, sticky="e", padx=5, pady=2)
+        great_grandparent_entry = ttk.Entry(hierarchy_frame, textvariable=self.great_grandparent_deck, width=20)
+        great_grandparent_entry.grid(row=0, column=1, sticky="w", padx=5, pady=2)
+        
+        # Mazo Abuelo
+        ttk.Label(hierarchy_frame, text="Mazo Abuelo:").grid(row=0, column=2, sticky="e", padx=5, pady=2)
+        grandparent_entry = ttk.Entry(hierarchy_frame, textvariable=self.grandparent_deck, width=20)
+        grandparent_entry.grid(row=0, column=3, sticky="w", padx=5, pady=2)
+        
+        # Prefijo Padre
+        ttk.Label(hierarchy_frame, text="Prefijo Padre:").grid(row=0, column=4, sticky="e", padx=5, pady=2)
+        parent_entry = ttk.Entry(hierarchy_frame, textvariable=self.parent_prefix, width=20)
+        parent_entry.grid(row=0, column=5, sticky="w", padx=5, pady=2)
+        
+        # Controles
+        control_frame = ttk.Frame(hierarchy_frame)
+        control_frame.grid(row=0, column=6, sticky="e", padx=10, pady=2)
+        
+        apply_btn = ttk.Button(control_frame, text="✅ Aplicar", command=self.apply_hierarchy_names)
+        apply_btn.pack(side="left", padx=2)
+        
+        def reset_counter():
+            self.hierarchy_counter = 0
+            messagebox.showinfo("Contador Reiniciado", "El sufijo numérico volverá a empezar desde 1.")
+            
+        reset_btn = ttk.Button(control_frame, text="🔄 Reset", command=reset_counter, width=8)
+        reset_btn.pack(side="left", padx=2)
+
+        return hierarchy_frame
+
     def setup_normal_mode(self):
         """Configura la vista del modo normal (4 cajitas)."""
         self.normal_frame = ttk.Frame(self.root, padding="10")
@@ -214,6 +334,10 @@ class AnkiImportInterface:
         self.auto_videos_btn = ttk.Button(header_frame, text="🎥 Modo Videos",
                                           command=self.show_automatic_videos_mode)
         self.auto_videos_btn.grid(row=0, column=3, sticky="e", padx=5)
+        
+        self.auto_books_btn = ttk.Button(header_frame, text="📚 Modo Libros",
+                                         command=self.show_automatic_books_mode)
+        self.auto_books_btn.grid(row=0, column=4, sticky="e", padx=5)
         
         # Frame para el prefijo del deck
         prefix_frame = ttk.Frame(self.normal_frame)
@@ -299,7 +423,7 @@ class AnkiImportInterface:
         self.automatic_images_frame = ttk.Frame(self.root, padding="10")
         self.automatic_images_frame.columnconfigure(0, weight=3)
         self.automatic_images_frame.columnconfigure(1, weight=1)
-        self.automatic_images_frame.rowconfigure(1, weight=1)
+        self.automatic_images_frame.rowconfigure(2, weight=1)
         
         # Header con botón de retroceso
         header_frame = ttk.Frame(self.automatic_images_frame)
@@ -313,9 +437,14 @@ class AnkiImportInterface:
                                font=("Arial", 14, "bold"))
         title_label.grid(row=0, column=1, sticky="w", padx=20)
         
+        # Frame de Jerarquía
+        hierarchy_frame = self._create_hierarchy_config_frame(self.automatic_images_frame)
+        hierarchy_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        
+        # Ajustamos el layout principal (Canvas y Logs) para que empiecen en la fila 2
         # Panel izquierdo: Secciones (scrollable)
         left_container = ttk.Frame(self.automatic_images_frame)
-        left_container.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
+        left_container.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
         left_container.columnconfigure(0, weight=1)
         left_container.rowconfigure(0, weight=1)
         
@@ -340,7 +469,7 @@ class AnkiImportInterface:
 
         # Panel derecho: Logs
         right_frame = ttk.LabelFrame(self.automatic_images_frame, text="Logs de Imágenes", padding="5")
-        right_frame.grid(row=1, column=1, sticky="nsew")
+        right_frame.grid(row=2, column=1, sticky="nsew")
         right_frame.columnconfigure(0, weight=1)
         right_frame.rowconfigure(0, weight=1)
         
@@ -354,48 +483,56 @@ class AnkiImportInterface:
         
         # Panel inferior: Botones
         bottom_frame = ttk.Frame(self.automatic_images_frame)
-        bottom_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        bottom_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         
-        add_section_btn = ttk.Button(bottom_frame, text="+ Añadir Sección", 
+        # Fila 1: Gestión de Secciones
+        row1 = ttk.Frame(bottom_frame)
+        row1.pack(fill="x", side="top", pady=2)
+        
+        add_section_btn = ttk.Button(row1, text="+ Añadir Sección", 
                                      command=self.add_section)
         add_section_btn.pack(side="left", padx=5)
         
-        check_status_btn = ttk.Button(bottom_frame, text="✓ Chequear Estado",
+        load_batch_btn = ttk.Button(row1, text="📂 Cargar Lote", 
+                                    command=self.load_image_batch)
+        load_batch_btn.pack(side="left", padx=5)
+        
+        check_status_btn = ttk.Button(row1, text="✓ Chequear Estado",
                                       command=self.check_sections_status)
         check_status_btn.pack(side="left", padx=5)
         
-        clear_all_sections_btn = ttk.Button(bottom_frame, text="🗑 Limpiar Todo",
+        clear_all_sections_btn = ttk.Button(row1, text="🗑 Limpiar Todo",
                                             command=self.clear_all_sections)
         clear_all_sections_btn.pack(side="left", padx=5)
         
-        check_api_btn = ttk.Button(bottom_frame, text="🔌 Chequear API",
+        check_api_btn = ttk.Button(row1, text="🔌 Chequear API",
                                    command=self.check_gemini_api)
         check_api_btn.pack(side="left", padx=5)
         
-        # Botón principal de procesamiento
-        self.process_sections_btn = ttk.Button(bottom_frame, text="🚀 Procesar Secciones",
-                                               command=self.process_all_sections_auto)
-        self.process_sections_btn.pack(side="left", padx=15)
+        # Fila 2: Acciones y Configuración
+        row2 = ttk.Frame(bottom_frame)
+        row2.pack(fill="x", side="top", pady=2)
         
-        # Botón de recuperación de sesiones
-        recover_btn = ttk.Button(bottom_frame, text="📂 Recuperar Sesión",
+        self.process_sections_btn = ttk.Button(row2, text="🚀 Procesar Secciones",
+                                               command=self.process_all_sections_auto)
+        self.process_sections_btn.pack(side="left", padx=5)
+        
+        recover_btn = ttk.Button(row2, text="📂 Recuperar Sesión",
                                  command=self.show_recover_session_dialog)
         recover_btn.pack(side="left", padx=5)
         
-        # Botón de importar pendientes
-        self.pending_btn = ttk.Button(bottom_frame, text="📋 Importar Pendientes",
+        self.pending_btn = ttk.Button(row2, text="📋 Importar Pendientes",
                                       command=self.import_pending_flashcards)
         self.pending_btn.pack(side="left", padx=5)
         self._update_pending_button()
         
-        # Botón de configuración
-        config_btn = ttk.Button(bottom_frame, text="⚙️ Configuración",
+        config_btn = ttk.Button(row2, text="⚙️ Configuración",
                                command=self.show_config_dialog)
         config_btn.pack(side="left", padx=5)
         
         # Label del set activo
-        self.active_set_label = ttk.Label(bottom_frame, text=f"Set: {self.config_manager.active_set_name}",
-                                          font=("Segoe UI", 9), foreground="blue")
+        self.active_set_label = ttk.Label(row2, text=f"Set: {self.config_manager.active_set_name}",
+                                          font=("Segoe UI", 9, "bold"), foreground="blue")
         self.active_set_label.pack(side="right", padx=10)
     
     def setup_automatic_text_mode(self):
@@ -403,7 +540,7 @@ class AnkiImportInterface:
         self.automatic_text_frame = ttk.Frame(self.root, padding="10")
         self.automatic_text_frame.columnconfigure(0, weight=3)
         self.automatic_text_frame.columnconfigure(1, weight=1)
-        self.automatic_text_frame.rowconfigure(1, weight=1)
+        self.automatic_text_frame.rowconfigure(2, weight=1)
         
         # Header con botón de retroceso
         header_frame = ttk.Frame(self.automatic_text_frame)
@@ -417,9 +554,14 @@ class AnkiImportInterface:
                                font=("Arial", 14, "bold"))
         title_label.grid(row=0, column=1, sticky="w", padx=20)
         
+        # Frame de Jerarquía
+        hierarchy_frame = self._create_hierarchy_config_frame(self.automatic_text_frame)
+        hierarchy_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+
+        # Ajustar fila para layout izquierdo
         # Panel izquierdo: Secciones (scrollable)
         left_container = ttk.Frame(self.automatic_text_frame)
-        left_container.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
+        left_container.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
         left_container.columnconfigure(0, weight=1)
         left_container.rowconfigure(0, weight=1)
         
@@ -446,7 +588,7 @@ class AnkiImportInterface:
 
         # Panel derecho: Logs
         right_frame = ttk.LabelFrame(self.automatic_text_frame, text="Logs de Texto", padding="5")
-        right_frame.grid(row=1, column=1, sticky="nsew")
+        right_frame.grid(row=2, column=1, sticky="nsew")
         right_frame.columnconfigure(0, weight=1)
         right_frame.rowconfigure(0, weight=1)
         
@@ -460,44 +602,205 @@ class AnkiImportInterface:
         
         # Panel inferior: Botones
         bottom_frame = ttk.Frame(self.automatic_text_frame)
-        bottom_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        bottom_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         
-        add_text_section_btn = ttk.Button(bottom_frame, text="+ Añadir Sección", 
+        # Fila 1: Gestión de Secciones
+        trow1 = ttk.Frame(bottom_frame)
+        trow1.pack(fill="x", side="top", pady=2)
+        
+        add_text_section_btn = ttk.Button(trow1, text="+ Añadir Sección", 
                                           command=self.add_text_section)
         add_text_section_btn.pack(side="left", padx=5)
         
-        check_text_status_btn = ttk.Button(bottom_frame, text="✓ Chequear Estado",
+        bulk_text_btn = ttk.Button(trow1, text="📄 Pegar y Segmentar Texto", 
+                                   command=self.show_bulk_text_segmentation_dialog)
+        bulk_text_btn.pack(side="left", padx=5)
+        
+        check_text_status_btn = ttk.Button(trow1, text="✓ Chequear Estado",
                                            command=self.check_text_sections_status)
         check_text_status_btn.pack(side="left", padx=5)
         
-        clear_all_text_sections_btn = ttk.Button(bottom_frame, text="🗑 Limpiar Todo",
+        clear_all_text_sections_btn = ttk.Button(trow1, text="🗑 Limpiar Todo",
                                                  command=self.clear_all_text_sections)
         clear_all_text_sections_btn.pack(side="left", padx=5)
         
-        check_api_btn = ttk.Button(bottom_frame, text="🔌 Chequear API",
+        check_api_btn = ttk.Button(trow1, text="🔌 Chequear API",
                                    command=self.check_gemini_api_text)
         check_api_btn.pack(side="left", padx=5)
         
-        # Botón principal de procesamiento
-        self.process_text_sections_btn = ttk.Button(bottom_frame, text="🚀 Procesar Secciones",
-                                                    command=self.process_all_text_sections)
-        self.process_text_sections_btn.pack(side="left", padx=15)
+        # Fila 2: Acciones y Configuración
+        trow2 = ttk.Frame(bottom_frame)
+        trow2.pack(fill="x", side="top", pady=2)
         
-        # Botón de configuración
-        config_btn = ttk.Button(bottom_frame, text="⚙️ Configuración",
+        self.process_text_sections_btn = ttk.Button(trow2, text="🚀 Procesar Secciones",
+                                                    command=self.process_all_text_sections)
+        self.process_text_sections_btn.pack(side="left", padx=5)
+        
+        # Botón Importar Pendientes
+        self.pending_text_btn = ttk.Button(trow2, text="📋 Importar Pendientes", 
+                                         command=self.import_pending_flashcards)
+        self.pending_text_btn.pack(side="left", padx=5)
+        
+        ttk.Button(trow2, text="📂 Recuperar Sesión",
+                  command=self.show_recover_text_session_dialog).pack(side="left", padx=5)
+        
+        config_btn = ttk.Button(trow2, text="⚙️ Configuración",
                                command=self.show_config_dialog)
         config_btn.pack(side="left", padx=5)
+
+        ai_struct_cb = ttk.Checkbutton(trow2, text="✨ Estructurar con IA (Estudiante Experto)", 
+                                      variable=self.use_ai_structuring_text)
+        ai_struct_cb.pack(side="left", padx=10)
         
         # Label del set activo
-        self.text_set_label = ttk.Label(bottom_frame, text=f"Set: {self.config_manager.active_set_name}",
-                                        font=("Segoe UI", 9), foreground="blue")
+        self.text_set_label = ttk.Label(trow2, text=f"Set: {self.config_manager.active_set_name}",
+                                        font=("Segoe UI", 9, "bold"), foreground="blue")
         self.text_set_label.pack(side="right", padx=10)
+        
+        # YouTube Downloader
+        from youtube_downloader import YoutubeDownloader
+        self.youtube_downloader = YoutubeDownloader()
+        self.youtube_url_var = tk.StringVar()
+
+    def setup_automatic_books_mode(self):
+        """Configura la vista del modo automático para libros (PDF/Word)."""
+        self.automatic_books_frame = ttk.Frame(self.root, padding="10")
+        self.automatic_books_frame.columnconfigure(0, weight=1)
+        
+        # Header con botón de retroceso
+        header_frame = ttk.Frame(self.automatic_books_frame)
+        header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header_frame.columnconfigure(1, weight=1)
+        
+        back_btn = ttk.Button(header_frame, text="← Volver", command=self.show_normal_mode)
+        back_btn.grid(row=0, column=0, sticky="w")
+        
+        title_label = ttk.Label(header_frame, text="📚 Modo Libros - PDF y Word completo",
+                               font=("Arial", 14, "bold"))
+        title_label.grid(row=0, column=1, sticky="w", padx=20)
+        
+        # Frame de configuración y carga
+        config_frame = ttk.LabelFrame(self.automatic_books_frame, text="⚙️ Carga y Segmentación", padding="20")
+        config_frame.grid(row=1, column=0, sticky="ew", pady=(10, 20), padx=5)
+        config_frame.columnconfigure(1, weight=1)
+        
+        # Archivo
+        ttk.Label(config_frame, text="Archivo (PDF/Word):").grid(row=0, column=0, sticky="w", pady=5)
+        self.book_path_var = tk.StringVar()
+        book_entry = ttk.Entry(config_frame, textvariable=self.book_path_var, width=60)
+        book_entry.grid(row=0, column=1, sticky="ew", padx=5)
+        
+        def browse_book():
+            path = filedialog.askopenfilename(
+                title="Seleccionar libro",
+                filetypes=[("Documentos", "*.pdf *.docx")]
+            )
+            if path:
+                self.book_path_var.set(path)
+        
+        browse_btn = ttk.Button(config_frame, text="🔍 Buscar", command=browse_book)
+        browse_btn.grid(row=0, column=2, sticky="w")
+        
+        # Segmentación
+        ttk.Label(config_frame, text="Páginas por Sección:").grid(row=1, column=0, sticky="w", pady=5)
+        self.pages_per_section_var = tk.IntVar(value=10)
+        pages_spin = ttk.Spinbox(config_frame, from_=1, to=100, textvariable=self.pages_per_section_var, width=10)
+        pages_spin.grid(row=1, column=1, sticky="w", padx=5)
+        
+        ttk.Label(config_frame, text="Solape de Páginas:").grid(row=2, column=0, sticky="w", pady=5)
+        self.pages_overlap_var = tk.IntVar(value=1)
+        overlap_spin = ttk.Spinbox(config_frame, from_=0, to=10, textvariable=self.pages_overlap_var, width=10)
+        overlap_spin.grid(row=2, column=1, sticky="w", padx=5)
+        
+        # Botón de acción
+        segment_btn = ttk.Button(config_frame, text="📑 Segmentar y Crear Secciones", 
+                                command=self.process_book_to_sections)
+        segment_btn.grid(row=3, column=0, columnspan=3, pady=20)
+
+    def process_book_to_sections(self):
+        """Procesa el PDF/Word y crea las secciones de texto."""
+        path = self.book_path_var.get().strip()
+        if not path or not os.path.exists(path):
+            messagebox.showwarning("Archivo no encontrado", "Por favor selecciona un archivo PDF o Word válido.")
+            return
+            
+        pages_per_section = self.pages_per_section_var.get()
+        overlap = self.pages_overlap_var.get()
+        
+        self.text_log(f"📑 Procesando libro: {os.path.basename(path)}...")
+        
+        pages_content = []
+        if path.lower().endswith('.pdf'):
+            pages_content = self.document_processor.extract_text_from_pdf(path)
+        elif path.lower().endswith('.docx'):
+            pages_content = self.document_processor.extract_text_from_docx(path)
+            
+        if not pages_content:
+            messagebox.showerror("Error", "No se pudo extraer texto del documento.")
+            return
+            
+        sections = self.document_processor.segment_pages(pages_content, pages_per_section, overlap)
+        
+        # Convertir a secciones de texto
+        self.show_automatic_text_mode()
+        self.clear_all_text_sections()
+        
+        for sec_data in sections:
+            self.add_text_section()
+            last_section = self.text_sections[-1]
+            last_section.title = sec_data["title"]
+            last_section.text = sec_data["content"]
+            
+            # Actualizar widget
+            widgets = self.text_section_widgets.get(last_section.section_id)
+            if widgets:
+                widgets["title_var"].set(sec_data["title"])
+                widgets["title_label"].config(text=sec_data["title"])
+                widgets["text_widget"].delete("1.0", tk.END)
+                widgets["text_widget"].insert("1.0", sec_data["content"])
+                
+        messagebox.showinfo("Procesamiento Completo", f"Se han creado {len(sections)} secciones de texto.")
+
+    def show_normal_mode(self):
+        self._hide_all_frames()
+        self.normal_frame.grid(row=0, column=0, sticky="nsew")
+        self.current_mode = "normal"
+
+    def show_automatic_images_mode(self):
+        self._hide_all_frames()
+        self.automatic_images_frame.grid(row=0, column=0, sticky="nsew")
+        self.current_mode = "automatic_images"
+        self.refresh_all_section_indicators()
+
+    def show_automatic_text_mode(self):
+        self._hide_all_frames()
+        self.automatic_text_frame.grid(row=0, column=0, sticky="nsew")
+        self.current_mode = "automatic_text"
+        self.refresh_all_section_indicators()
+
+    def show_automatic_videos_mode(self):
+        self._hide_all_frames()
+        self.automatic_videos_frame.grid(row=0, column=0, sticky="nsew")
+        self.current_mode = "automatic_videos"
+        self.refresh_all_section_indicators()
+
+    def show_automatic_books_mode(self):
+        self._hide_all_frames()
+        self.automatic_books_frame.grid(row=0, column=0, sticky="nsew")
+        self.current_mode = "automatic_books"
+
+    def _hide_all_frames(self):
+        if self.normal_frame: self.normal_frame.grid_forget()
+        if self.automatic_images_frame: self.automatic_images_frame.grid_forget()
+        if self.automatic_text_frame: self.automatic_text_frame.grid_forget()
+        if self.automatic_videos_frame: self.automatic_videos_frame.grid_forget()
+        if self.automatic_books_frame: self.automatic_books_frame.grid_forget()
     
     def setup_automatic_videos_mode(self):
         """Configura la vista del modo automático para videos."""
         self.automatic_videos_frame = ttk.Frame(self.root, padding="10")
         self.automatic_videos_frame.columnconfigure(0, weight=1)
-        self.automatic_videos_frame.rowconfigure(2, weight=1)
+        self.automatic_videos_frame.rowconfigure(3, weight=1)
         
         # Header con botón de retroceso
         header_frame = ttk.Frame(self.automatic_videos_frame)
@@ -511,23 +814,22 @@ class AnkiImportInterface:
                                font=("Arial", 14, "bold"))
         title_label.grid(row=0, column=1, sticky="w", padx=20)
         
+        # Frame de Jerarquía
+        hierarchy_frame = self._create_hierarchy_config_frame(self.automatic_videos_frame)
+        hierarchy_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
         # Frame de configuración y carga de video
-        config_frame = ttk.LabelFrame(self.automatic_videos_frame, text="⚙️ Configuración y Video", padding="10")
-        config_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        config_frame = ttk.LabelFrame(self.automatic_videos_frame, text="⚙️ Configuración y Video", padding="20")
+        config_frame.grid(row=2, column=0, sticky="ew", pady=(10, 20), padx=5)
         config_frame.columnconfigure(1, weight=1)
         
         # Duración de segmento
         ttk.Label(config_frame, text="Duración de segmento (min):").grid(row=0, column=0, sticky="w", pady=5)
         self.segment_duration_var = tk.DoubleVar(value=3.0)
-        segment_scale = ttk.Scale(config_frame, from_=1, to=10, variable=self.segment_duration_var, 
-                                 orient="horizontal")
-        segment_scale.grid(row=0, column=1, sticky="ew", padx=5)
-        self.segment_duration_label = ttk.Label(config_frame, text="3.0 min")
-        self.segment_duration_label.grid(row=0, column=2, sticky="w")
-        
-        def update_segment_label(*args):
-            self.segment_duration_label.config(text=f"{self.segment_duration_var.get():.1f} min")
-        self.segment_duration_var.trace_add("write", update_segment_label)
+        segment_spinbox = ttk.Spinbox(config_frame, from_=0.1, to=999.0, increment=0.5, 
+                                      textvariable=self.segment_duration_var, width=10)
+        segment_spinbox.grid(row=0, column=1, sticky="w", padx=5)
+        ttk.Label(config_frame, text="minutos").grid(row=0, column=2, sticky="w")
         
         # Overlap
         ttk.Label(config_frame, text="Overlap (seg):").grid(row=1, column=0, sticky="w", pady=5)
@@ -542,32 +844,82 @@ class AnkiImportInterface:
             self.overlap_label.config(text=f"{self.overlap_var.get()} seg")
         self.overlap_var.trace_add("write", update_overlap_label)
         
+        # Calidad de transcripción (Modelo de Whisper)
+        ttk.Label(config_frame, text="Calidad de Transcripción (Modelo):").grid(row=2, column=0, sticky="w", pady=5)
+        self.whisper_model_var = tk.StringVar(value="base")
+        model_combo = ttk.Combobox(config_frame, textvariable=self.whisper_model_var, 
+                                   values=["base (rápido, ~1GB RAM)", "small (~2GB RAM)", "medium (Preciso, ~5GB RAM)", "large (Lento, ~10GB RAM)"], 
+                                   state="readonly", width=30)
+        # Extraer solo el nombre base "base", "small", "medium", "large" al seleccionar
+        def on_model_select(event):
+            selected = self.whisper_model_var.get()
+            model_name = selected.split(" ")[0]
+            self.whisper_model_var.set(model_name)
+        model_combo.bind("<<ComboboxSelected>>", on_model_select)
+        model_combo.grid(row=2, column=1, sticky="w", padx=5)
+
         # Idioma
-        ttk.Label(config_frame, text="Idioma del video:").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Label(config_frame, text="Idioma del video:").grid(row=3, column=0, sticky="w", pady=5)
         self.language_var = tk.StringVar(value="es")
         language_combo = ttk.Combobox(config_frame, textvariable=self.language_var, 
                                      values=["es", "en", "fr", "de", "it", "pt"], 
                                      state="readonly", width=10)
-        language_combo.grid(row=2, column=1, sticky="w", padx=5)
+        language_combo.grid(row=3, column=1, sticky="w", padx=5)
         
-        # Botones de carga y procesamiento
+        # --- NUEVO: Descarga de YouTube ---
+        ttk.Label(config_frame, text="📺 Descargar de YouTube (URL):").grid(row=4, column=0, sticky="w", pady=5)
+        self.yt_url_entry = ttk.Entry(config_frame, textvariable=self.youtube_url_var, width=50)
+        self.yt_url_entry.grid(row=4, column=1, sticky="w", padx=5)
+        
+        self.yt_download_btn = ttk.Button(config_frame, text="📥 Descargar", command=self.download_youtube_video)
+        self.yt_download_btn.grid(row=4, column=2, sticky="w")
+        
+        # ----- Área de Drop de Video -----
+        drop_frame = tk.Frame(config_frame, bg="#e0e0e0", height=80, relief="groove", bd=2)
+        drop_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(15, 15))
+        drop_frame.grid_propagate(False)
+        self.video_drop_frame = drop_frame # Reference
+        
+        self.video_drop_label = tk.Label(drop_frame, text="🎥 Arrastra un video aquí o haz clic para buscar",
+                             bg="#e0e0e0", fg="#444444", font=("Arial", 11, "bold"))
+        self.video_drop_label.place(relx=0.5, rely=0.5, anchor="center")
+        
+        # Bind click
+        drop_frame.bind("<Button-1>", lambda e: self.upload_video_for_processing())
+        self.video_drop_label.bind("<Button-1>", lambda e: self.upload_video_for_processing())
+        
+        # Eventos Drag & Drop si la librería está disponible
+        if hasattr(drop_frame, 'drop_target_register'):
+            from tkinterdnd2 import DND_FILES
+            drop_frame.drop_target_register(DND_FILES)
+            drop_frame.dnd_bind('<<Drop>>', self._on_video_drop)
+            drop_frame.dnd_bind('<Enter>', lambda e: drop_frame.config(bg="#c0c0c0"))
+            drop_frame.dnd_bind('<Leave>', lambda e: drop_frame.config(bg="#e0e0e0"))
+        
+        # Botones de control y status
         buttons_frame = ttk.Frame(config_frame)
-        buttons_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        buttons_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 5))
         
-        self.upload_video_btn = ttk.Button(buttons_frame, text="📁 Cargar Video", 
-                                           command=self.upload_video_for_processing)
-        self.upload_video_btn.pack(side="left", padx=5)
+        # Separador visual
+        ttk.Separator(config_frame, orient="horizontal").grid(row=5, column=0, columnspan=3, sticky="ew", pady=(30, 0))
+        
+        # (El botón Cargar Video original se oculta ya que el drop hace lo mismo,
+        # pero mantenemos la referencia si otro método lo requiere, o dejamos Procesar)
         
         self.process_video_btn = ttk.Button(buttons_frame, text="🚀 Procesar Video",
                                             command=self.process_video_complete, state="disabled")
         self.process_video_btn.pack(side="left", padx=5)
         
-        self.video_info_label = ttk.Label(buttons_frame, text="", foreground="gray")
+        self.video_info_label = ttk.Label(buttons_frame, text="", foreground="blue", font=("Arial", 10, "bold"))
         self.video_info_label.pack(side="left", padx=10)
+
+        self.change_video_btn = ttk.Button(buttons_frame, text="🔄 Cambiar Video",
+                                            command=self.upload_video_for_processing)
+        # Se empaca dinámicamente cuando hay un video cargado
         
         # Contenedor principal con 2 columnas
         main_container = ttk.Frame(self.automatic_videos_frame)
-        main_container.grid(row=2, column=0, sticky="nsew")
+        main_container.grid(row=3, column=0, sticky="nsew")
         main_container.columnconfigure(0, weight=2)
         main_container.columnconfigure(1, weight=1)
         main_container.rowconfigure(0, weight=1)
@@ -576,18 +928,24 @@ class AnkiImportInterface:
         left_panel = ttk.Frame(main_container)
         left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         left_panel.columnconfigure(0, weight=1)
-        left_panel.rowconfigure(0, weight=1)
-        left_panel.rowconfigure(1, weight=1)
+        left_panel.rowconfigure(0, weight=0)  # grouping_frame fijo
+        left_panel.rowconfigure(1, weight=1)  # sections_frame expande
+
+        # Contenedor para la ventana emergente de segmentos
+        self.segments_window = tk.Toplevel(self.root)
+        self.segments_window.title("Segmentos Procesados")
+        self.segments_window.geometry("800x600")
+        self.segments_window.withdraw() # Ocultar inicialmente
+        self.segments_window.protocol("WM_DELETE_WINDOW", self.hide_segments_window)
         
-        # Área de segmentos procesados
-        segments_frame = ttk.LabelFrame(left_panel, text="📹 Segmentos Procesados", padding="5")
-        segments_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
-        segments_frame.columnconfigure(0, weight=1)
-        segments_frame.rowconfigure(0, weight=1)
+        self.segments_container = ttk.Frame(self.segments_window)
+        self.segments_container.pack(fill="both", expand=True, padx=10, pady=10)
+        self.segments_container.columnconfigure(0, weight=1)
+        self.segments_container.rowconfigure(0, weight=1)
         
         # Canvas con scrollbar para segmentos
-        self.segments_canvas = tk.Canvas(segments_frame, highlightthickness=0, height=200)
-        segments_scrollbar = ttk.Scrollbar(segments_frame, orient="vertical", 
+        self.segments_canvas = tk.Canvas(self.segments_container, highlightthickness=0, height=300)
+        segments_scrollbar = ttk.Scrollbar(self.segments_container, orient="vertical", 
                                           command=self.segments_canvas.yview)
         
         self.segments_inner_frame = ttk.Frame(self.segments_canvas)
@@ -608,7 +966,7 @@ class AnkiImportInterface:
         
         # Área de configuración de agrupación
         grouping_frame = ttk.LabelFrame(left_panel, text="📋 Configurar Agrupación", padding="10")
-        grouping_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        grouping_frame.grid(row=0, column=0, sticky="ew", pady=5)
         grouping_frame.columnconfigure(1, weight=1)
         
         ttk.Label(grouping_frame, text="Transcripciones por sección:").grid(row=0, column=0, sticky="w", padx=5)
@@ -622,9 +980,14 @@ class AnkiImportInterface:
                                              state="disabled")
         self.create_sections_btn.grid(row=0, column=2, padx=5)
         
+        self.view_segments_btn = ttk.Button(grouping_frame, text="👁️ Ver Segmentos Procesados",
+                                            command=self.show_segments_window,
+                                            state="disabled")
+        self.view_segments_btn.grid(row=1, column=0, columnspan=3, pady=(10, 0), sticky="ew")
+
         # Área de secciones creadas
         sections_frame = ttk.LabelFrame(left_panel, text="📚 Secciones Creadas", padding="5")
-        sections_frame.grid(row=2, column=0, sticky="nsew", pady=(5, 0))
+        sections_frame.grid(row=1, column=0, sticky="nsew", pady=(5, 0))
         sections_frame.columnconfigure(0, weight=1)
         sections_frame.rowconfigure(0, weight=1)
         
@@ -665,7 +1028,7 @@ class AnkiImportInterface:
         
         # Panel inferior: Botones de acción
         bottom_frame = ttk.Frame(self.automatic_videos_frame)
-        bottom_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        bottom_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         
         self.process_sections_btn = ttk.Button(bottom_frame, text="🚀 Procesar Secciones",
                                               command=self.process_video_sections,
@@ -675,6 +1038,17 @@ class AnkiImportInterface:
         self.clear_video_btn = ttk.Button(bottom_frame, text="🗑 Limpiar Todo",
                                          command=self.clear_video_mode)
         self.clear_video_btn.pack(side="left", padx=5)
+        
+        # Botón de recuperación de sesiones
+        recover_btn = ttk.Button(bottom_frame, text="📂 Recuperar Sesión",
+                                 command=self.show_recover_video_session_dialog)
+        recover_btn.pack(side="left", padx=5)
+        
+        # Botón de importar pendientes
+        self.pending_video_btn = ttk.Button(bottom_frame, text="📋 Importar Pendientes",
+                                      command=self.import_pending_flashcards)
+        self.pending_video_btn.pack(side="left", padx=5)
+        self._update_pending_button() # Llama al método general para actualizar contadores
         
         # Botón de configuración
         config_btn = ttk.Button(bottom_frame, text="⚙️ Configuración",
@@ -686,6 +1060,18 @@ class AnkiImportInterface:
                                          font=("Segoe UI", 9), foreground="blue")
         self.video_set_label.pack(side="right", padx=10)
     
+    def show_segments_window(self):
+        """Abre la ventana emergente con los segmentos procesados."""
+        if self.segments_window:
+            self.segments_window.deiconify()
+            self.segments_window.lift()
+            self.root.update_idletasks()
+
+    def hide_segments_window(self):
+        """Oculta la ventana de segmentos sin perder los datos."""
+        if self.segments_window:
+            self.segments_window.withdraw()
+
     def _on_sections_configure(self, event):
         """Actualiza el scroll region cuando cambia el contenido."""
         self.sections_canvas.configure(scrollregion=self.sections_canvas.bbox("all"))
@@ -745,7 +1131,17 @@ class AnkiImportInterface:
     def add_section(self):
         """Añade una nueva sección de imágenes."""
         self.section_counter += 1
+        self.hierarchy_counter += 1
+        
         section = ImageSection(self.section_counter)
+        
+        # Asignar nombre automático con el prefijo padre si existe
+        prefix = self.parent_prefix.get().strip()
+        if prefix:
+            section.title = f"{prefix} {self.hierarchy_counter}"
+        else:
+            section.title = f"Sección {self.section_counter}"
+            
         self.sections.append(section)
         
         self._create_section_widget(section)
@@ -856,18 +1252,22 @@ class AnkiImportInterface:
                 "count": count_label
             }
         
-        # Área de drop para imágenes
-        drop_frame = tk.Frame(section_frame, bg="#e0e0e0", height=120, relief="groove", bd=2)
-        drop_frame.grid(row=2, column=0, sticky="ew", pady=10)
+        # Área de drop para imágenes (se oculta al tener imágenes)
+        drop_frame = tk.Frame(section_frame, bg="#e0e0e0", height=60, relief="groove", bd=2)
+        drop_frame.grid(row=2, column=0, sticky="ew", pady=5)
         drop_frame.grid_propagate(False)
         
-        drop_label = tk.Label(drop_frame, text="🖼 Arrastra imágenes aquí\no haz clic para seleccionar",
+        drop_label = tk.Label(drop_frame, text="🖼 Arrastra imágenes aquí o haz clic",
                              bg="#e0e0e0", fg="#666666", font=("Arial", 10))
         drop_label.place(relx=0.5, rely=0.5, anchor="center")
         
         # Bind click para seleccionar archivos
         drop_frame.bind("<Button-1>", lambda e, s=section: self.browse_images(s))
         drop_label.bind("<Button-1>", lambda e, s=section: self.browse_images(s))
+        
+        # Botón compacto para añadir imágenes (oculto inicialmente)
+        add_more_btn = ttk.Button(section_frame, text="➕ Añadir más imágenes", 
+                                  command=lambda s=section: self.browse_images(s))
 
         # Frame para thumbnails
         thumbnails_frame = ttk.Frame(section_frame)
@@ -883,6 +1283,7 @@ class AnkiImportInterface:
             "title_label": title_label,
             "title_var": title_var,
             "drop_frame": drop_frame,
+            "add_more_btn": add_more_btn,
             "thumbnails_frame": thumbnails_frame,
             "info_label": info_label,
             "status_labels": status_labels
@@ -1033,7 +1434,6 @@ class AnkiImportInterface:
                 return
             
             # Guardar temporalmente la imagen
-            import tempfile
             temp_dir = tempfile.gettempdir()
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             temp_path = os.path.join(temp_dir, f"clipboard_{timestamp}.png")
@@ -1136,6 +1536,14 @@ class AnkiImportInterface:
         widgets["info_label"].config(
             text=f"{count} imagen{'es' if count != 1 else ''} - {total_size:.2f} MB total"
         )
+        
+        # Lógica de mostrar/ocultar el drop_frame para ahorrar espacio
+        if count > 0:
+            widgets["drop_frame"].grid_forget()
+            widgets["add_more_btn"].grid(row=2, column=0, sticky="w", pady=2, padx=5)
+        else:
+            widgets["add_more_btn"].grid_forget()
+            widgets["drop_frame"].grid(row=2, column=0, sticky="ew", pady=5)
 
     def _show_tooltip(self, event, text):
         """Muestra un tooltip."""
@@ -1156,7 +1564,7 @@ class AnkiImportInterface:
             messagebox.showwarning("Aviso", "Debe haber al menos una sección")
             return
         
-        if messagebox.askyesno("Confirmar", f"¿Eliminar {section.title} y todas sus imágenes?"):
+        if messagebox.askyesno("Confirmar", f"¿Eliminar {section.title}?\n\nAl eliminar, las secciones siguientes se re-enumerarán dinámicamente según el prefijo configurado."):
             # Eliminar widget
             widgets = self.section_widgets.get(section.section_id)
             if widgets:
@@ -1173,13 +1581,69 @@ class AnkiImportInterface:
             
             # Reorganizar grid
             self._reorganize_sections()
+            
+            # Renombrado dinámico
+            self.apply_hierarchy_names()
     
     def _reorganize_sections(self):
         """Reorganiza las secciones en el grid."""
+        for section_id, widgets in self.section_widgets.items():
+            widgets["frame"].grid_forget()
+        
         for idx, section in enumerate(self.sections):
             widgets = self.section_widgets.get(section.section_id)
             if widgets:
-                widgets["frame"].grid(row=idx, column=0, sticky="ew", pady=5, padx=5)
+                widgets["frame"].grid(row=idx // 2, column=idx % 2, sticky="nsew", padx=5, pady=5)
+
+    def load_image_batch(self):
+        """Carga un lote de imágenes y permite distribuirlas en secciones."""
+        files = filedialog.askopenfilenames(
+            title="Seleccionar lote de imágenes",
+            filetypes=[("Imágenes", "*.png *.jpg *.jpeg *.gif *.bmp *.webp")]
+        )
+        
+        if not files:
+            return
+            
+        # Preguntar cuántas imágenes por sección
+        count_per_section = simpledialog.askinteger(
+            "Distribuir lote", 
+            f"Se seleccionaron {len(files)} imágenes.\n¿Cuántas imágenes por sección?",
+            initialvalue=5, minvalue=1, maxvalue=20
+        )
+        
+        if not count_per_section:
+            return
+            
+        self.auto_log(f"📦 Cargando lote de {len(files)} imágenes...")
+        
+        # Crear secciones y distribuir
+        for i in range(0, len(files), count_per_section):
+            batch = files[i:i + count_per_section]
+            
+            # Crear nueva sección
+            self.section_counter += 1
+            self.hierarchy_counter += 1
+            new_section = ImageSection(self.section_counter)
+            
+            # Título dinámico
+            prefix = self.parent_prefix.get().strip()
+            if prefix:
+                new_section.title = f"{prefix} {self.hierarchy_counter}"
+            else:
+                new_section.title = f"Sección {self.section_counter}"
+                
+            self.sections.append(new_section)
+            self._create_section_widget(new_section)
+            
+            # Añadir imágenes a la sección
+            for img_path in batch:
+                self._add_image_to_section(new_section, img_path)
+            
+            self.auto_log(f"   ✅ Creada {new_section.title} con {len(batch)} imágenes.")
+            
+        self._reorganize_sections()
+        messagebox.showinfo("Lote cargado", f"Se han creado {math.ceil(len(files)/count_per_section)} secciones automáticamente.")
 
     def check_sections_status(self):
         """Chequea el estado de todas las secciones."""
@@ -1242,6 +1706,7 @@ class AnkiImportInterface:
             self.thumbnail_refs.clear()
             self.sections.clear()
             self.section_counter = 0
+            self.hierarchy_counter = 0
             
             # Añadir una sección inicial
             self.add_section()
@@ -1318,10 +1783,14 @@ class AnkiImportInterface:
         self.is_processing = True
         self.process_sections_btn.config(state="disabled", text="⏳ Procesando...")
         
-        thread = threading.Thread(target=self._process_sections_thread, daemon=True)
+        # Extraer variables Tkinter en hilo principal
+        bisabuelo_str = self.great_grandparent_deck.get().strip()
+        grandparent_str = self.grandparent_deck.get().strip()
+        
+        thread = threading.Thread(target=self._process_sections_thread, args=(bisabuelo_str, grandparent_str), daemon=True)
         thread.start()
     
-    def _process_sections_thread(self):
+    def _process_sections_thread(self, bisabuelo_str, grandparent_str):
         """Thread de procesamiento de secciones."""
         try:
             # Obtener configuración activa
@@ -1349,12 +1818,25 @@ class AnkiImportInterface:
                         "image_paths": [img["path"] for img in section.images]
                     })
             
+            # 0. Crear sesión para guardado jerárquico
+            bisabuelo = bisabuelo_str
+            grandparent = grandparent_str or "General"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            if bisabuelo:
+                self.current_image_session = os.path.join(MASTER_FOLDER, bisabuelo, grandparent, f"Session_{timestamp}")
+            else:
+                self.current_image_session = os.path.join(MASTER_FOLDER, grandparent, f"Session_{timestamp}")
+            
             # Procesar todas las secciones
             results = self.flashcard_generator.process_all_sections(
                 sections=sections_data,
                 converter=self.converter,
                 anki_manager=self.anki_manager,
-                progress_callback=self._on_section_progress
+                bisabuelo_str=bisabuelo_str,
+                grandparent_str=grandparent_str,
+                progress_callback=self._on_section_progress,
+                session_path=self.current_image_session
             )
             
             # Mostrar resumen final
@@ -1493,11 +1975,21 @@ class AnkiImportInterface:
     def add_text_section(self):
         """Añade una nueva sección de texto."""
         self.text_section_counter += 1
+        self.hierarchy_counter += 1
+        
         section = TextSection(self.text_section_counter)
+        
+        prefix = self.parent_prefix.get().strip()
+        if prefix:
+            section.title = f"{prefix} {self.hierarchy_counter}"
+        else:
+            section.title = f"Sección {self.text_section_counter}"
+            
         self.text_sections.append(section)
         
         self._create_text_section_widget(section)
         self.text_log(f"📁 Sección {section.section_id} creada")
+        self._save_current_text_session()
     
     def _create_text_section_widget(self, section: TextSection):
         """Crea el widget visual para una sección de texto."""
@@ -1539,6 +2031,7 @@ class AnkiImportInterface:
             title_label.grid(row=0, column=0, sticky="w")
             edit_btn.grid(row=0, column=1, sticky="w", padx=5)
             self.text_log(f"📝 Sección {section.section_id} renombrada a: {new_title}")
+            self._save_current_text_session()
         
         edit_btn.config(command=start_edit)
         confirm_btn.config(command=confirm_edit)
@@ -1625,6 +2118,8 @@ class AnkiImportInterface:
             info_label.config(text=f"{char_count:,} caracteres")
         
         text_widget.bind("<KeyRelease>", update_char_count)
+        # Bind para guardar al cambiar foco
+        text_widget.bind("<FocusOut>", lambda e: self._save_current_text_session())
         
         # Info de la sección
         info_label = ttk.Label(section_frame, text="0 caracteres", foreground="gray")
@@ -1677,7 +2172,7 @@ class AnkiImportInterface:
             messagebox.showwarning("Aviso", "Debe haber al menos una sección")
             return
         
-        if messagebox.askyesno("Confirmar", f"¿Eliminar {section.title}?"):
+        if messagebox.askyesno("Confirmar", f"¿Eliminar {section.title}?\n\nAl eliminar, las secciones siguientes se re-enumerarán dinámicamente según el prefijo configurado."):
             # Eliminar widget
             widgets = self.text_section_widgets.get(section.section_id)
             if widgets:
@@ -1687,9 +2182,13 @@ class AnkiImportInterface:
             # Eliminar sección
             self.text_sections.remove(section)
             self.text_log(f"🗑 Sección eliminada: {section.title}")
+            self._save_current_text_session()
             
             # Reorganizar grid
             self._reorganize_text_sections()
+            
+            # Renombrado dinámico
+            self.apply_hierarchy_names()
     
     def _reorganize_text_sections(self):
         """Reorganiza las secciones de texto en el grid."""
@@ -1745,10 +2244,12 @@ class AnkiImportInterface:
             self.text_section_widgets.clear()
             self.text_sections.clear()
             self.text_section_counter = 0
+            self.hierarchy_counter = 0
             
             # Añadir una sección inicial
             self.add_text_section()
             self.text_log("🗑 Todas las secciones eliminadas")
+            self._save_current_text_session()
     
     def check_gemini_api_text(self):
         """Chequea la conexión con la API de Gemini (para modo texto)."""
@@ -1817,12 +2318,27 @@ class AnkiImportInterface:
         self.is_processing = True
         self.process_text_sections_btn.config(state="disabled", text="⏳ Procesando...")
         
-        thread = threading.Thread(target=self._process_text_sections_thread, daemon=True)
+        # Extraer string de tkinter en el hilo principal para evitar vacíos
+        bisabuelo_str = self.great_grandparent_deck.get().strip()
+        grandparent_str = self.grandparent_deck.get().strip()
+        
+        thread = threading.Thread(target=self._process_text_sections_thread, args=(bisabuelo_str, grandparent_str), daemon=True)
         thread.start()
     
-    def _process_text_sections_thread(self):
+    def _process_text_sections_thread(self, bisabuelo_str, grandparent_str):
         """Thread de procesamiento de secciones de texto."""
         try:
+            # 0. Asegurar sesión activa
+            if not hasattr(self, 'current_text_session') or not self.current_text_session:
+                bisabuelo = bisabuelo_str
+                grandparent = grandparent_str or "General"
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                if bisabuelo:
+                    self.current_text_session = os.path.join(MASTER_FOLDER, bisabuelo, grandparent, f"Session_{timestamp}")
+                else:
+                    self.current_text_session = os.path.join(MASTER_FOLDER, grandparent, f"Session_{timestamp}")
+
             # Obtener configuración activa
             active_config = self.config_manager.get_active_set()
             
@@ -1853,9 +2369,44 @@ class AnkiImportInterface:
                 self.text_log(f"{'='*60}")
                 self.text_log(f"   📝 Caracteres: {len(texto):,}")
                 
-                # Generar flashcards SECUENCIALMENTE
-                self.text_log(f"\n🤖 GENERACIÓN SECUENCIAL DE FLASHCARDS")
-                results = self.flashcard_generator.generate_all_flashcards_sequential(texto)
+                # Paso 1: Estructuración con IA (Opcional)
+                texto_para_tarjetas = texto
+                if self.use_ai_structuring_text.get():
+                    self.text_log(f"\n✨ PASO 1: ESTRUCTURACIÓN CON IA (Estudiante Experto)")
+                    # Usamos extract_text_from_files (que usa el OCR_PROMPT mejorado) 
+                    # pasando el texto en un archivo temporal
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', encoding='utf-8', delete=False) as tf:
+                        tf.write(texto)
+                        temp_path = tf.name
+                    
+                    try:
+                        structured_text = self.flashcard_generator.extract_text_from_files([temp_path])
+                        if structured_text.strip():
+                            texto_para_tarjetas = structured_text
+                            self.text_log(f"   ✅ Estructuración completada ({len(texto_para_tarjetas)} caracteres)")
+                            
+                            # Guardar la versión estructurada (Expert Notes)
+                            if hasattr(self.flashcard_generator, '_save_ocr_transcript'):
+                                save_deck = grandparent_str
+                                if hasattr(self, 'current_text_session') and self.current_text_session:
+                                    save_deck = self.current_text_session
+                                
+                                self.flashcard_generator._save_ocr_transcript(
+                                    texto_para_tarjetas, 
+                                    save_deck, 
+                                    f"{section.title}_Expert_Notes",
+                                    subfolder="expert_notes",
+                                    extension="md"
+                                )
+                        else:
+                            self.text_log(f"   ⚠️ Falló la estructuración, se usará el texto original.")
+                    finally:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+
+                # Paso 2: Generar flashcards SECUENCIALMENTE
+                self.text_log(f"\n🤖 PASO 2: GENERACIÓN SECUENCIAL DE FLASHCARDS")
+                results = self.flashcard_generator.generate_all_flashcards_sequential(texto_para_tarjetas)
                 
                 # Procesar resultados
                 for card_type, result in results.items():
@@ -1874,8 +2425,32 @@ class AnkiImportInterface:
                                     flashcard_list.append({"front": front.strip(), "back": back.strip()})
                             
                             if flashcard_list:
+                                # Construir nombre de mazo con jerarquía
+                                deck_name = ""
+                                if bisabuelo_str:
+                                    deck_name += f"{bisabuelo_str}::"
+                                if grandparent_str:
+                                    deck_name += f"{grandparent_str}::"
+                                deck_name += f"{section.title}::{card_type}"
+                                
+                                # Guardar respaldo del flashcard con sufijo de tipo
+                                if hasattr(self.flashcard_generator, '_save_ocr_transcript'):
+                                    # Determinar carpeta de guardado (preferir sesión actual si existe)
+                                    save_deck = grandparent_str
+                                    sub_folder = "flashcards"
+                                    
+                                    # Si estamos en una sesión activa, usar esa ruta
+                                    if hasattr(self, 'current_text_session') and self.current_text_session:
+                                        save_deck = self.current_text_session
+                                    
+                                    self.flashcard_generator._save_ocr_transcript(
+                                        flashcards, 
+                                        save_deck, 
+                                        f"{section.title}_{card_type}",
+                                        subfolder=sub_folder
+                                    )
+                                
                                 # Importar a Anki
-                                deck_name = f"Flashcards - {section.title} - {card_type}"
                                 success, msg, count = self.anki_manager.sync_flashcards_to_anki(
                                     deck_name, flashcard_list, card_type
                                 )
@@ -1960,13 +2535,49 @@ class AnkiImportInterface:
     
     # ==================== MÉTODOS DE VIDEOS ====================
     
-    def upload_video_for_processing(self):
-        """Abre diálogo para seleccionar un video y lo prepara para procesamiento."""
-        filetypes = [
-            ("Videos", "*.mp4 *.avi *.mov *.mkv"),
-            ("Todos los archivos", "*.*")
-        ]
-        file_path = filedialog.askopenfilename(title="Seleccionar video", filetypes=filetypes)
+    def _on_video_drop(self, event):
+        """Manejador para el evento drop de videos."""
+        # Limpiar ruta (tkinterdnd2 a veces añade llaves {} a rutas con espacios)
+        file_path = event.data
+        if file_path.startswith('{') and file_path.endswith('}'):
+            file_path = file_path[1:-1]
+            
+        # Llamar al método de carga con la ruta directa
+        self.upload_video_for_processing(file_path=file_path)
+
+    def download_youtube_video(self):
+        """Descarga un video de YouTube a través de una URL."""
+        url = self.youtube_url_var.get().strip()
+        if not url:
+            messagebox.showwarning("URL vacía", "Por favor ingresa una URL de YouTube.")
+            return
+            
+        self.yt_download_btn.config(state="disabled", text="⏳ Descargando...")
+        self.video_log(f"🎬 Iniciando descarga de YouTube: {url}")
+        
+        def run_download():
+            path = self.youtube_downloader.download_video(url, self.video_log)
+            
+            def on_complete():
+                self.yt_download_btn.config(state="normal", text="📥 Descargar")
+                if path and os.path.exists(path):
+                    self.video_log(f"✅ Video de YouTube descargado: {path}")
+                    self.upload_video_for_processing(file_path=path)
+                else:
+                    messagebox.showerror("Error", "No se pudo descargar el video de YouTube.")
+            
+            self.root.after(0, on_complete)
+            
+        threading.Thread(target=run_download, daemon=True).start()
+
+    def upload_video_for_processing(self, file_path: str = None):
+        """Abre diálogo para seleccionar un video y lo prepara para procesamiento (o usa ruta directa)."""
+        if not file_path:
+            filetypes = [
+                ("Videos", "*.mp4 *.avi *.mov *.mkv"),
+                ("Todos los archivos", "*.*")
+            ]
+            file_path = filedialog.askopenfilename(title="Seleccionar video", filetypes=filetypes)
         
         if not file_path:
             return
@@ -1986,6 +2597,12 @@ class AnkiImportInterface:
         self.current_video_path = file_path
         self.video_info_label.config(text=f"📹 {os.path.basename(file_path)}")
         
+        # Ocultar zona de drag&drop, mostrar botón compacto
+        if hasattr(self, 'video_drop_frame'):
+            self.video_drop_frame.grid_forget()
+        if hasattr(self, 'change_video_btn'):
+            self.change_video_btn.pack(side="left", padx=5)
+            
         # Habilitar botón de procesamiento
         self.process_video_btn.config(state="normal")
     
@@ -2003,9 +2620,9 @@ class AnkiImportInterface:
         msg = f"¿Procesar el video?\n\n"
         msg += "Esto realizará:\n"
         msg += "1. Segmentación del video según configuración\n"
-        msg += "2. Extracción de audio de cada segmento (MP3)\n"
-        msg += "3. Transcripción con Whisper\n\n"
-        msg += "Nota: Este proceso puede tomar varios minutos."
+        msg += "2. Extracción de fragmentos de video completos (MP4)\n"
+        msg += "3. Transcripción Multimodal Inteligente con Gemini AI\n\n"
+        msg += "Nota: Este proceso puede tomar varios minutos según su conexión y longitud."
         
         if not messagebox.askyesno("Confirmar procesamiento", msg):
             return
@@ -2013,7 +2630,6 @@ class AnkiImportInterface:
         # Iniciar procesamiento en thread
         self.is_processing = True
         self.process_video_btn.config(state="disabled", text="⏳ Procesando...")
-        self.upload_video_btn.config(state="disabled")
         
         thread = threading.Thread(target=self._process_video_thread, daemon=True)
         thread.start()
@@ -2026,18 +2642,57 @@ class AnkiImportInterface:
             overlap = self.overlap_var.get()
             language = self.language_var.get()
             
+            # NOTA: model_size se retiene en la UI visualmente pero no se usa para Gemini
+            # La rotación de modelos y fallbacks está hardcodeada internamente
+            
             self.video_log(f"\n{'='*60}")
-            self.video_log(f"🎬 PROCESANDO VIDEO")
+            self.video_log(f"🎬 PROCESANDO VIDEO (Motor: Gemini Multimodal & API Rotation)")
             self.video_log(f"{'='*60}")
             
-            # Procesar video con video_processor
+            # 0. Crear sesión para guardado jerárquico
+            bisabuelo = self.great_grandparent_deck.get().strip()
+            grandparent = self.grandparent_deck.get().strip() or "General"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            if bisabuelo:
+                self.current_video_session = os.path.join(MASTER_FOLDER, bisabuelo, grandparent, f"Session_{timestamp}")
+            else:
+                self.current_video_session = os.path.join(MASTER_FOLDER, grandparent, f"Session_{timestamp}")
+            
+            # 0.1. Inicializar flashcard_generator ANTES de procesar para guardado incremental
+            if not hasattr(self, 'flashcard_generator') or not self.flashcard_generator:
+                # Usar el generador global
+
+                active_config = self.config_manager.get_active_set()
+                self.flashcard_generator = GeminiFlashcardGenerator(log_callback=self.video_log, config_set=active_config)
+            
+            # 0.2. Contador de segmentos guardados incrementalmente
+            saved_count = [0]
+            
+            # Callback para guardado incremental: se llama cada vez que un segmento termina de transcribirse
+            def on_segment_complete(segment):
+                """Guarda la transcripción del segmento al instante para no perder progreso."""
+                if segment.transcription_text:
+                    self.flashcard_generator._save_ocr_transcript(
+                        segment.transcription_text, self.current_video_session, 
+                        f"segment_{segment.segment_id:03d}", 
+                        subfolder="chunks"
+                    )
+                    saved_count[0] += 1
+                    self.video_log(f"   💾 Segmento {segment.segment_id} guardado incrementalmente ({saved_count[0]} guardados)")
+            
+            # Procesar video con video_processor (con callback de guardado incremental)
             result = self.video_processor.process_video(
                 video_path=self.current_video_path,
                 segment_duration=segment_duration,
                 overlap=overlap,
                 use_silence_detection=False,
                 use_transcription_analysis=False,
-                language=language
+                language=language,
+                on_segment_complete=on_segment_complete,
+                great_grandparent=self.great_grandparent_deck.get(),
+                grandparent=self.grandparent_deck.get(),
+                father_prefix=self.parent_prefix.get()
             )
             
             if not result.get("success"):
@@ -2049,21 +2704,41 @@ class AnkiImportInterface:
             # Guardar segmentos
             self.current_video_segments = result.get("segments", [])
             
+            # Guardar la transcripción completa consolidada (bonus, los chunks ya están guardados)
+            try:
+                full_transcription = "\n\n".join([
+                    f"--- Segmento {s.segment_id} ({s.start_time} - {s.end_time}) ---\n{s.transcription_text}"
+                    for s in self.current_video_segments
+                ])
+                
+                self.flashcard_generator._save_ocr_transcript(
+                    full_transcription, self.current_video_session, "original_full_transcription", 
+                    subfolder="original_text"
+                )
+                self.video_log(f"   💾 Transcripción completa consolidada guardada")
+            except Exception as save_err:
+                self.video_log(f"   ⚠️ Error guardando transcripción consolidada (los chunks individuales ya están guardados): {save_err}")
+            
             self.video_log(f"\n✅ Video procesado exitosamente")
             self.video_log(f"   📊 {len(self.current_video_segments)} segmentos creados")
+            self.video_log(f"   💾 {saved_count[0]} segmentos guardados incrementalmente")
             self.video_log(f"   📝 Total de caracteres: {result.get('total_chars', 0):,}")
+            self.video_log(f"   📂 Sesión guardada en: {self.current_video_session}")
             
             # Mostrar segmentos en la UI
             self.root.after(0, self._display_video_segments)
             
-            # Habilitar botón de crear secciones
+            # Habilitar botón de crear secciones y botón de ventana emergente
             self.root.after(0, lambda: self.create_sections_btn.config(state="normal"))
+            self.root.after(0, lambda: self.view_segments_btn.config(state="normal"))
+            self.root.after(0, self.show_segments_window)
             
             # Mostrar popup
             self.root.after(0, lambda: messagebox.showinfo(
                 "Procesamiento completado",
                 f"Video procesado exitosamente\n\n"
                 f"Segmentos creados: {len(self.current_video_segments)}\n"
+                f"Segmentos guardados: {saved_count[0]}\n"
                 f"Total de caracteres: {result.get('total_chars', 0):,}\n\n"
                 f"Ahora puedes configurar la agrupación en secciones."
             ))
@@ -2081,7 +2756,6 @@ class AnkiImportInterface:
             self.root.after(0, lambda: self.process_video_btn.config(
                 state="normal", text="🚀 Procesar Video"
             ))
-            self.root.after(0, lambda: self.upload_video_btn.config(state="normal"))
     
     def _display_video_segments(self):
         """Muestra los segmentos procesados en la UI."""
@@ -2094,6 +2768,10 @@ class AnkiImportInterface:
         # Crear tarjetas para cada segmento
         for segment in self.current_video_segments:
             self._create_segment_widget(segment)
+            
+        # Forzar actualización de UI y scrollregion tras crear los widgets
+        self.root.update_idletasks()
+        self.segments_canvas.configure(scrollregion=self.segments_canvas.bbox("all"))
     
     def _create_segment_widget(self, segment: VideoSegment):
         """Crea el widget visual para un segmento de video."""
@@ -2228,7 +2906,16 @@ class AnkiImportInterface:
         
         for i in range(0, total_segments, segments_per_section):
             self.video_section_counter += 1
+            self.hierarchy_counter += 1
+            
             section = VideoSection(self.video_section_counter)
+            
+            # Configurar sufijo padre
+            prefix = self.parent_prefix.get().strip()
+            if prefix:
+                section.title = f"{prefix} {self.hierarchy_counter}"
+            else:
+                section.title = f"Sección {self.video_section_counter}"
             
             # Añadir segmentos a la sección
             for j in range(i, min(i + segments_per_section, total_segments)):
@@ -2290,6 +2977,11 @@ class AnkiImportInterface:
         edit_btn.config(command=start_edit)
         confirm_btn.config(command=confirm_edit)
         title_entry.bind("<Return>", lambda e: confirm_edit())
+        
+        # Botón eliminar sección
+        delete_btn = ttk.Button(header_frame, text="🗑 Eliminar", 
+                               command=lambda: self.delete_video_section(section))
+        delete_btn.grid(row=0, column=2, sticky="e", padx=5)
         
         # Info de la sección
         info_frame = ttk.Frame(section_frame)
@@ -2355,6 +3047,37 @@ class AnkiImportInterface:
             "status_labels": status_labels,
             "section": section
         }
+        
+    def delete_video_section(self, section: VideoSection):
+        """Elimina una sección de video específica."""
+        if messagebox.askyesno("Confirmar", f"¿Eliminar {section.title}?\n\nAl eliminar, las secciones siguientes se re-enumerarán dinámicamente según el prefijo configurado."):
+            # Eliminar widget
+            widgets = self.video_section_widgets.get(section.section_id)
+            if widgets:
+                widgets["frame"].destroy()
+                del self.video_section_widgets[section.section_id]
+            
+            # Eliminar de la lista de secciones
+            if section in self.video_sections:
+                self.video_sections.remove(section)
+                self.video_log(f"🗑 Sección eliminada: {section.title}")
+            
+            # Reorganizar el grid
+            self._reorganize_video_sections()
+            
+            # Deshabilitar botón de procesar si no quedan secciones
+            if not self.video_sections:
+                self.process_sections_btn.config(state="disabled")
+            
+            # Renombrado dinámico
+            self.apply_hierarchy_names()
+            
+    def _reorganize_video_sections(self):
+        """Reorganiza las secciones de video en el grid tras eliminar una."""
+        for idx, section in enumerate(self.video_sections):
+            widgets = self.video_section_widgets.get(section.section_id)
+            if widgets:
+                widgets["frame"].grid(row=idx, column=0, sticky="ew", pady=5, padx=5)
     
     def process_video_sections(self):
         """Procesa todas las secciones de video con Gemini."""
@@ -2386,10 +3109,14 @@ class AnkiImportInterface:
         self.is_processing = True
         self.process_sections_btn.config(state="disabled", text="⏳ Procesando...")
         
-        thread = threading.Thread(target=self._process_video_sections_thread, daemon=True)
+        # Extraer string de tkinter en el hilo principal para evitar vacíos
+        bisabuelo_str = self.great_grandparent_deck.get().strip()
+        grandparent_str = self.grandparent_deck.get().strip()
+        
+        thread = threading.Thread(target=self._process_video_sections_thread, args=(bisabuelo_str, grandparent_str), daemon=True)
         thread.start()
     
-    def _process_video_sections_thread(self):
+    def _process_video_sections_thread(self, bisabuelo_str, grandparent_str):
         """Thread de procesamiento de secciones de video."""
         try:
             # Obtener configuración activa
@@ -2424,32 +3151,47 @@ class AnkiImportInterface:
                     self.video_log(f"⚠️ No hay transcripciones en esta sección")
                     continue
                 
+                # Construir nombre de mazo con jerarquía
+                deck_prefix = ""
+                if bisabuelo_str:
+                    deck_prefix += f"{bisabuelo_str}::"
+                if grandparent_str:
+                    deck_prefix += f"{grandparent_str}::"
+                deck_prefix += f"{section.title}"
+                
                 # Procesar sección con Gemini
                 result = self.flashcard_generator.process_video_section(
                     section_title=section.title,
                     transcription_paths=transcription_paths,
                     converter=self.converter,
                     anki_manager=self.anki_manager,
-                    deck_prefix=section.title
+                    deck_prefix=deck_prefix,
+                    session_path=getattr(self, 'current_video_session', None)
                 )
                 
                 if result.get("success"):
-                    # Actualizar indicadores visuales
+                    self.video_log(f"\n   ✅ RESULTADOS DE LA SECCIÓN:")
+                    # Actualizar indicadores visuales y logear detalles
                     import_results = result.get("results", {})
                     for card_type, card_result in import_results.items():
                         if card_result.get("success"):
                             count = card_result.get("count", 0)
                             total_flashcards += count
+                            self.video_log(f"      • {card_type}: {count} flashcards importadas")
                             self.root.after(0, lambda sid=section.section_id, ct=card_type, c=count:
                                           self._update_video_section_status(sid, ct, True, c))
                         else:
+                            error_msg = card_result.get("error", "Error desconocido")
+                            self.video_log(f"      ❌ {card_type}: Fallo - {error_msg}")
                             self.root.after(0, lambda sid=section.section_id, ct=card_type:
                                           self._update_video_section_status(sid, ct, False, 0))
+                else:
+                    self.video_log(f"\n   ❌ SECCIÓN FALLIDA: {result.get('error', 'Error desconocido')}")
             
             self.video_log(f"\n{'='*60}")
-            self.video_log(f"✅ PROCESAMIENTO COMPLETADO")
+            self.video_log(f"✅ PROCESAMIENTO GLOBAL COMPLETADO")
             self.video_log(f"   • Secciones procesadas: {len(self.video_sections)}")
-            self.video_log(f"   • Total flashcards importadas: {total_flashcards}")
+            self.video_log(f"   • Total flashcards importadas a Anki: {total_flashcards}")
             self.video_log(f"{'='*60}\n")
             
             # Mostrar popup
@@ -2502,7 +3244,66 @@ class AnkiImportInterface:
             for card_type, labels in widgets["status_labels"].items():
                 labels["state"].config(text="⬜", fg="gray")
                 labels["count"].config(text="")
-    
+                
+    def refresh_all_section_indicators(self):
+        """Actualiza la UI de TODAS las secciones para reflejar la configuración activa actual de flashcards."""
+        active_config = self.config_manager.get_active_set()
+        active_types = active_config.get("active_types", {})
+        
+        type_icons = {
+            "basic": ("📝", "Basic"),
+            "multiple_choice": ("🔘", "Multiple"),
+            "cloze": ("🔲", "Cloze"),
+            "vocabulary": ("🔤", "Vocab"),
+            "level_1_cloze": ("1️⃣", "L1"),
+            "level_2_relations": ("2️⃣", "L2"),
+            "level_3_application": ("3️⃣", "L3"),
+            "level_4_analysis": ("4️⃣", "L4")
+        }
+        
+        card_types_icons = [
+            (card_type, *type_icons.get(card_type, ("❓", card_type[:6])))
+            for card_type, is_active in active_types.items() if is_active
+        ]
+        
+        # Refrescar tanto secciones de video como de imágenes
+        for widgets_dict in (self.video_section_widgets, self.section_widgets):
+            for section_id, widgets in widgets_dict.items():
+                if "status_labels" not in widgets or not widgets["status_labels"]:
+                    continue
+                    
+                first_label_dict = next(iter(widgets["status_labels"].values()))
+                if not first_label_dict or "state" not in first_label_dict:
+                    continue
+                    
+                status_frame = first_label_dict["state"].master.master
+                
+                # Limpiar componentes antiguos
+                for child in status_frame.winfo_children():
+                    child.destroy()
+                
+                # Crear los nuevos indicadores según la config activa
+                new_status_labels = {}
+                for idx, (card_type, icon, label) in enumerate(card_types_icons):
+                    type_frame = ttk.Frame(status_frame)
+                    type_frame.grid(row=0, column=idx, padx=(0, 15))
+                    
+                    icon_label = ttk.Label(type_frame, text=icon, font=("Segoe UI", 9))
+                    icon_label.grid(row=0, column=0)
+                    
+                    state_label = tk.Label(type_frame, text="⬜", font=("Segoe UI", 9), fg="gray")
+                    state_label.grid(row=0, column=1, padx=2)
+                    
+                    count_label = ttk.Label(type_frame, text="", font=("Segoe UI", 8))
+                    count_label.grid(row=0, column=2)
+                    
+                    new_status_labels[card_type] = {
+                        "state": state_label,
+                        "count": count_label
+                    }
+                
+                # Actualizar las referencias internas del widget
+                widgets["status_labels"] = new_status_labels
     def clear_video_mode(self):
         """Limpia todo el modo video."""
         if not self.current_video_segments and not self.video_sections:
@@ -2527,6 +3328,19 @@ class AnkiImportInterface:
             self.process_video_btn.config(state="disabled")
             self.create_sections_btn.config(state="disabled")
             self.process_sections_btn.config(state="disabled")
+            self.hierarchy_counter = 0
+            
+            # Restaurar vista de arrastrar/cargar video
+            if hasattr(self, 'video_drop_frame'):
+                self.video_drop_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(15, 15))
+            if hasattr(self, 'change_video_btn'):
+                self.change_video_btn.pack_forget()
+            if hasattr(self, 'view_segments_btn'):
+                self.view_segments_btn.config(state="disabled")
+                
+            # Ocultar popup de segmentos si está abierto
+            if self.segments_window:
+                self.hide_segments_window()
             
             self.video_log("🗑 Modo video limpiado")
     
@@ -2695,6 +3509,160 @@ class AnkiImportInterface:
         except Exception as e:
             messagebox.showerror("Count Error", f"Error counting flashcards:\n{str(e)}")
 
+    def show_bulk_text_segmentation_dialog(self):
+        """Muestra un diálogo para pegar un bloque grande de texto y segmentarlo."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("📄 Pegar y Segmentar Texto")
+        # Ajustar tamaño y centrar
+        dialog.geometry("800x600")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        main_frame = ttk.Frame(dialog, padding="15")
+        main_frame.pack(fill="both", expand=True)
+        
+        ttk.Label(main_frame, text="Pega aquí el texto completo (de YouTube, GitHub, Blogs, etc.):", 
+                  font=("Arial", 11, "bold")).pack(anchor="w", pady=(0, 5))
+        
+        text_area = tk.Text(main_frame, height=15, wrap="word", font=("Consolas", 10))
+        text_area.pack(fill="both", expand=True, pady=5)
+        
+        # Opciones de segmentación
+        config_frame = ttk.LabelFrame(main_frame, text="⚙️ Configuración de Segmentación", padding="10")
+        config_frame.pack(fill="x", pady=10)
+        
+        # Tamaño de fragmento
+        ttk.Label(config_frame, text="Tamaño del Fragmento (caracteres):").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        chunk_size_var = tk.IntVar(value=3000)
+        ttk.Spinbox(config_frame, from_=500, to=20000, increment=500, textvariable=chunk_size_var, width=10).grid(row=0, column=1, sticky="w")
+        
+        # Overlap
+        ttk.Label(config_frame, text="Solape / Overlap (caracteres):").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        overlap_var = tk.IntVar(value=300)
+        ttk.Spinbox(config_frame, from_=0, to=2000, increment=50, textvariable=overlap_var, width=10).grid(row=1, column=1, sticky="w")
+        
+        # Chunks por sección
+        ttk.Label(config_frame, text="Fragmentos por Sección:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        chunks_per_section_var = tk.IntVar(value=2)
+        ttk.Spinbox(config_frame, from_=1, to=10, textvariable=chunks_per_section_var, width=10).grid(row=2, column=1, sticky="w")
+        
+        def start_segmentation():
+            full_text = text_area.get("1.0", "end-1c").strip()
+            if not full_text:
+                messagebox.showwarning("Texto vacío", "Por favor pega algún texto para segmentar.")
+                return
+            
+            size = chunk_size_var.get()
+            overlap = overlap_var.get()
+            per_section = chunks_per_section_var.get()
+            
+            if size <= overlap:
+                messagebox.showerror("Error", "El tamaño del fragmento debe ser mayor al solape.")
+                return
+            
+            # Realizar segmentación
+            self.segment_text_into_sections(full_text, size, overlap, per_section)
+            dialog.destroy()
+            
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill="x", pady=(10, 0))
+        
+        ttk.Button(btn_frame, text="✨ Segmentar y Cargar", command=start_segmentation).pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="Cancelar", command=dialog.destroy).pack(side="right", padx=5)
+
+    def segment_text_into_sections(self, text, chunk_size, overlap, chunks_per_section):
+        """Segmenta el texto en trozos con overlap y los agrupa en secciones."""
+        self.text_log("📄 Iniciando segmentación de texto...")
+        
+        # 0. Crear sesión para guardado jerárquico
+        bisabuelo = self.great_grandparent_deck.get().strip()
+        grandparent = self.grandparent_deck.get().strip() or "General"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        if bisabuelo:
+            self.current_text_session = os.path.join(MASTER_FOLDER, bisabuelo, grandparent, f"Session_{timestamp}")
+        else:
+            self.current_text_session = os.path.join(MASTER_FOLDER, grandparent, f"Session_{timestamp}")
+        
+        # Guardar texto original completo
+        if getattr(self, 'flashcard_generator', None) is None:
+              # Usar el generador global
+
+              active_config = self.config_manager.get_active_set()
+              self.flashcard_generator = GeminiFlashcardGenerator(log_callback=self.text_log, config_set=active_config)
+
+        self.flashcard_generator._save_ocr_transcript(
+            text, self.current_text_session, "original_full_text", subfolder="original_text"
+        )
+
+        # 1. Crear los fragments (chunks)
+        chunks = []
+        start = 0
+        text_len = len(text)
+        
+        while start < text_len:
+            end = min(start + chunk_size, text_len)
+            chunk = text[start:end]
+            chunks.append(chunk)
+            
+            # Guardar cada chunk individualmente
+            self.flashcard_generator._save_ocr_transcript(
+                chunk, self.current_text_session, f"chunk_{len(chunks)}", subfolder="chunks"
+            )
+            
+            if end >= text_len:
+                break
+            
+            # El siguiente inicio es el fin actual menos el solape
+            start = end - overlap
+            # Si por solape no avanzamos, forzamos avance de 1 caracter para evitar loop infinito
+            if start <= (end - chunk_size):
+                start = end + 1
+            
+        self.text_log(f"✅ Texto dividido en {len(chunks)} fragmentos.")
+        
+        # 2. Agrupar chunks en secciones
+        created_count = 0
+        for i in range(0, len(chunks), chunks_per_section):
+            # Obtener el grupo de chunks para esta sección
+            group = chunks[i:i + chunks_per_section]
+            # Combinar con un separador claro
+            section_content = "\n\n--- SIGUIENTE FRAGMENTO ---\n\n".join(group)
+            
+            # Crear y añadir la sección
+            self.text_section_counter += 1
+            self.hierarchy_counter += 1
+            
+            new_section = TextSection(self.text_section_counter)
+            new_section.set_text(section_content)
+            
+            # Título dinámico respetando prefijo si existe
+            prefix = self.parent_prefix.get().strip()
+            chunk_range = f"{i+1}-{min(i + chunks_per_section, len(chunks))}"
+            if prefix:
+                new_section.title = f"{prefix} {self.hierarchy_counter} (Frags {chunk_range})"
+            else:
+                new_section.title = f"Sección {self.text_section_counter} (Frags {chunk_range})"
+            
+            self.text_sections.append(new_section)
+            
+            # Crear el widget visual
+            self._create_text_section_widget(new_section)
+            
+            # Poblar el widget de texto inmediatamente
+            widgets = self.text_section_widgets.get(new_section.section_id)
+            if widgets:
+                text_widget = widgets["text_widget"]
+                text_widget.delete("1.0", "end")
+                text_widget.insert("1.0", section_content)
+                widgets["info_label"].config(text=f"{len(section_content):,} caracteres")
+            
+            created_count += 1
+            
+        self.text_log(f"📚 Creadas {created_count} secciones de texto automáticamente.")
+        messagebox.showinfo("Segmentación completada", 
+                            f"Se han creado {created_count} secciones a partir de {len(chunks)} fragmentos.\nArchivos guardados en: {self.current_text_session}")
+
     # ==================== SISTEMA DE SESIONES ====================
     
     def _save_current_session(self):
@@ -2710,7 +3678,11 @@ class AnkiImportInterface:
             first_section_title = self.sections[0].title if self.sections else "Sin título"
             session_data = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "great_grandparent": self.great_grandparent_deck.get(),
+                "grandparent": self.grandparent_deck.get(),
+                "father_prefix": self.parent_prefix.get(),
                 "first_section": first_section_title,
+                "num_sections": len(self.sections),
                 "sections": []
             }
             
@@ -2736,11 +3708,64 @@ class AnkiImportInterface:
         except Exception as e:
             self.auto_log(f"⚠️ Error guardando sesión: {e}")
     
+    def _save_current_text_session(self):
+        """Guarda la sesión actual de texto automáticamente."""
+        if not self.text_sections or not any(s.get_text().strip() for s in self.text_sections):
+            return  # No guardar si no hay secciones con texto
+        
+        try:
+            # Cargar sesiones existentes
+            sessions = self._load_text_sessions()
+            
+            # Crear datos de la sesión actual
+            first_section_title = self.text_sections[0].title if self.text_sections else "Sin título"
+            session_data = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "great_grandparent": self.great_grandparent_deck.get(),
+                "grandparent": self.grandparent_deck.get(),
+                "father_prefix": self.parent_prefix.get(),
+                "first_section": first_section_title,
+                "num_sections": len(self.text_sections),
+                "sections": []
+            }
+            
+            for section in self.text_sections:
+                section_info = {
+                    "title": section.title,
+                    "text": section.get_text()
+                }
+                session_data["sections"].append(section_info)
+            
+            # Añadir al inicio de la lista
+            sessions.insert(0, session_data)
+            
+            # Mantener solo las últimas 10
+            sessions = sessions[:10]
+            
+            # Guardar
+            with open(TEXT_SESSIONS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(sessions, f, ensure_ascii=False, indent=2)
+            
+            self.text_log(f"💾 Sesión de texto guardada: {session_data['timestamp']} - {first_section_title}")
+            
+        except Exception as e:
+            self.text_log(f"⚠️ Error guardando sesión de texto: {e}")
+    
     def _load_sessions(self) -> list:
         """Carga las sesiones guardadas."""
         try:
             if os.path.exists(SESSIONS_FILE):
                 with open(SESSIONS_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return []
+
+    def _load_text_sessions(self) -> list:
+        """Carga las sesiones de texto guardadas."""
+        try:
+            if os.path.exists(TEXT_SESSIONS_FILE):
+                with open(TEXT_SESSIONS_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
         except Exception:
             pass
@@ -2786,11 +3811,13 @@ class AnkiImportInterface:
         # Poblar lista
         for idx, session in enumerate(sessions):
             timestamp = session.get("timestamp", "?")
-            first_section = session.get("first_section", "Sin título")
-            num_sections = len(session.get("sections", []))
+            ggp = session.get("great_grandparent", "N/A")
+            gp = session.get("grandparent", "N/A")
+            prefix = session.get("father_prefix", "N/A")
+            num_sec = session.get("num_sections", len(session.get("sections", [])))
             total_images = sum(len(s.get("images", [])) for s in session.get("sections", []))
             
-            display_text = f"{timestamp} - {first_section[:30]}... ({num_sections} secciones, {total_images} imgs)"
+            display_text = f"[{timestamp}] {ggp} > {gp} > {prefix} ({num_sec} partes, {total_images} imgs)"
             listbox.insert(tk.END, display_text)
         
         # Seleccionar primera por defecto
@@ -2858,8 +3885,364 @@ class AnkiImportInterface:
         listbox.bind("<<ListboxSelect>>", on_select)
         on_select(None)  # Mostrar info de la primera
     
+    def show_recover_text_session_dialog(self):
+        """Muestra el diálogo para recuperar una sesión de texto."""
+        sessions = self._load_text_sessions()
+        
+        if not sessions:
+            messagebox.showinfo("Sin sesiones", "No hay sesiones de texto guardadas para recuperar.")
+            return
+        
+        # Crear ventana de diálogo
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Recuperar Sesión de Texto")
+        dialog.geometry("500x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Centrar ventana
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() - 500) // 2
+        y = (dialog.winfo_screenheight() - 400) // 2
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Título
+        ttk.Label(dialog, text="Selecciona una sesión de texto para recuperar:", 
+                  font=("Segoe UI", 11, "bold")).pack(pady=10)
+        
+        # Lista de sesiones
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        listbox = tk.Listbox(list_frame, font=("Segoe UI", 10), 
+                            yscrollcommand=scrollbar.set, height=12)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        # Poblar lista
+        for idx, session in enumerate(sessions):
+            timestamp = session.get("timestamp", "?")
+            ggp = session.get("great_grandparent", "N/A")
+            gp = session.get("grandparent", "N/A")
+            prefix = session.get("father_prefix", "N/A")
+            num_sec = session.get("num_sections", len(session.get("sections", [])))
+            
+            display_text = f"[{timestamp}] {ggp} > {gp} > {prefix} ({num_sec} partes)"
+            listbox.insert(tk.END, display_text)
+        
+        # Seleccionar primera por defecto
+        listbox.selection_set(0)
+        
+        # Frame de botones
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill="x", padx=10, pady=10)
+        
+        selected_session = [None]
+        
+        def on_replace():
+            idx = listbox.curselection()
+            if idx:
+                selected_session[0] = sessions[idx[0]]
+                dialog.destroy()
+                self._recover_text_session(selected_session[0], replace=True)
+        
+        def on_add():
+            idx = listbox.curselection()
+            if idx:
+                selected_session[0] = sessions[idx[0]]
+                dialog.destroy()
+                self._recover_text_session(selected_session[0], replace=False)
+        
+        def on_cancel():
+            dialog.destroy()
+        
+        def on_delete():
+            idx = listbox.curselection()
+            if idx:
+                if messagebox.askyesno("Confirmar", "¿Eliminar esta sesión de texto guardada?"):
+                    sessions.pop(idx[0])
+                    with open(TEXT_SESSIONS_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(sessions, f, ensure_ascii=False, indent=2)
+                    listbox.delete(idx[0])
+                    if not sessions:
+                        dialog.destroy()
+                        messagebox.showinfo("Info", "No quedan sesiones guardadas.")
+        
+        ttk.Button(btn_frame, text="🔄 Reemplazar", command=on_replace).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="➕ Añadir", command=on_add).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="🗑 Eliminar", command=on_delete).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="❌ Cancelar", command=on_cancel).pack(side="right", padx=5)
+        
+        # Info de la sesión seleccionada
+        info_frame = ttk.LabelFrame(dialog, text="Detalles de la sesión")
+        info_frame.pack(fill="x", padx=10, pady=5)
+        
+        info_label = ttk.Label(info_frame, text="", wraplength=450)
+        info_label.pack(padx=5, pady=5)
+        
+        def on_select(event):
+            idx = listbox.curselection()
+            if idx:
+                session = sessions[idx[0]]
+                sections_info = []
+                for s in session.get("sections", []):
+                    title = s.get("title", "?")
+                    text_len = len(s.get("text", ""))
+                    sections_info.append(f"• {title} ({text_len:,} caracteres)")
+                info_label.config(text="\n".join(sections_info[:5]) + 
+                                 ("\n..." if len(sections_info) > 5 else ""))
+        
+        listbox.bind("<<ListboxSelect>>", on_select)
+        on_select(None)
+    
+    def _recover_text_session(self, session_data: dict, replace: bool):
+        """Recupera una sesión de texto guardada."""
+        # Restaurar configuración de jerarquía si existe
+        if "great_grandparent" in session_data:
+            self.great_grandparent_deck.set(session_data["great_grandparent"])
+        if "grandparent" in session_data:
+            self.grandparent_deck.set(session_data["grandparent"])
+        if "father_prefix" in session_data:
+            self.parent_prefix.set(session_data["father_prefix"])
+            
+        if replace:
+            # Limpiar secciones actuales
+            for section_id, widgets in list(self.text_section_widgets.items()):
+                widgets["frame"].destroy()
+            self.text_section_widgets.clear()
+            self.text_sections.clear()
+            self.text_section_counter = 0
+            self.hierarchy_counter = 0
+        
+        # Recuperar secciones
+        recovered_count = 0
+        
+        for section_info in session_data.get("sections", []):
+            title = section_info.get("title", f"Sección {self.text_section_counter + 1}")
+            content = section_info.get("text", "")
+            
+            # Crear nueva sección
+            self.text_section_counter += 1
+            self.hierarchy_counter += 1
+            section = TextSection(self.text_section_counter)
+            section.title = title
+            section.set_text(content)
+            self.text_sections.append(section)
+            self._create_text_section_widget(section)
+            
+            # Cargar el texto en el widget
+            widgets = self.text_section_widgets.get(section.section_id)
+            if widgets:
+                text_widget = widgets["text_widget"]
+                text_widget.insert("1.0", content)
+                widgets["info_label"].config(text=f"{len(content):,} caracteres")
+                # Actualizar título si fue personalizado
+                widgets["title_label"].config(text=title)
+                widgets["title_var"].set(title)
+            
+            recovered_count += 1
+        
+        # Mostrar resumen
+        action = "Reemplazadas" if replace else "Añadidas"
+        self.text_log(f"\n📂 {action} {recovered_count} secciones de texto desde sesión guardada")
+    
+    def show_recover_video_session_dialog(self):
+        """Muestra el diálogo para recuperar una sesión de video."""
+        temp_dir = getattr(self.video_processor, "TEMP_DIR", "temp_videos")
+        
+        sessions = []
+        if os.path.exists(temp_dir):
+            for d in os.listdir(temp_dir):
+                if d.startswith("session_"):
+                    meta_path = os.path.join(temp_dir, d, "metadata.json")
+                    if os.path.exists(meta_path):
+                        try:
+                            with open(meta_path, 'r', encoding='utf-8') as f:
+                                meta = json.load(f)
+                                meta["session_folder"] = os.path.join(temp_dir, d)
+                                sessions.append(meta)
+                        except Exception as e:
+                            self.video_log(f"⚠️ Error leyendo metadata de {d}: {e}")
+        
+        # Sort by creation date descending
+        sessions.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        
+        if not sessions:
+            messagebox.showinfo("Sin sesiones", "No hay sesiones de video guardadas para recuperar.")
+            return
+            
+        # Crear ventana de diálogo
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Recuperar Sesión de Video")
+        dialog.geometry("600x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Centrar ventana
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() - 600) // 2
+        y = (dialog.winfo_screenheight() - 400) // 2
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Título
+        ttk.Label(dialog, text="Selecciona una sesión de video para recuperar:", 
+                  font=("Segoe UI", 11, "bold")).pack(pady=10)
+        
+        # Lista de sesiones
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        listbox = tk.Listbox(list_frame, font=("Segoe UI", 10), 
+                            yscrollcommand=scrollbar.set, height=12)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        # Poblar lista
+        for session in sessions:
+            created_at = session.get("created_at", "?")
+            ggp = session.get("great_grandparent", "N/A")
+            gp = session.get("grandparent", "N/A")
+            prefix = session.get("father_prefix", "N/A")
+            num_segments = session.get("total_segments", 0)
+            
+            display_text = f"[{created_at}] {ggp} > {gp} > {prefix} ({num_segments} partes)"
+            listbox.insert(tk.END, display_text)
+            
+        listbox.selection_set(0)
+        
+        # Frame de botones
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill="x", padx=10, pady=10)
+        
+        def on_recover():
+            idx = listbox.curselection()
+            if idx:
+                session = sessions[idx[0]]
+                dialog.destroy()
+                self._recover_video_session(session)
+                
+        def on_cancel():
+            dialog.destroy()
+            
+        def on_delete():
+            idx = listbox.curselection()
+            if idx:
+                if messagebox.askyesno("Confirmar", "¿Eliminar esta sesión guardada? Esto borrará videos y transcripciones."):
+                    session = sessions[idx[0]]
+                    folder = session.get("session_folder")
+                    if folder and os.path.exists(folder):
+                        try:
+                            import shutil
+                            shutil.rmtree(folder)
+                            sessions.pop(idx[0])
+                            listbox.delete(idx[0])
+                            self.video_log(f"🗑️ Sesión de video eliminada: {os.path.basename(folder)}")
+                            if not sessions:
+                                dialog.destroy()
+                                messagebox.showinfo("Info", "No quedan sesiones guardadas.")
+                        except Exception as e:
+                            messagebox.showerror("Error", f"No se pudo eliminar la sesión: {e}")
+                            
+        ttk.Button(btn_frame, text="✅ Recuperar", command=on_recover).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="🗑 Eliminar", command=on_delete).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="❌ Cancelar", command=on_cancel).pack(side="right", padx=5)
+        
+        # Info de la sesión seleccionada
+        info_frame = ttk.LabelFrame(dialog, text="Detalles de la sesión")
+        info_frame.pack(fill="x", padx=10, pady=5)
+        
+        info_label = ttk.Label(info_frame, text="", wraplength=550)
+        info_label.pack(padx=5, pady=5)
+        
+        def on_select(event):
+            idx = listbox.curselection()
+            if idx:
+                session = sessions[idx[0]]
+                d = session.get("duration", 0)
+                dur_str = f"{int(d//60)}:{int(d%60):02d}"
+                info = (f"Video: {session.get('original_video', 'N/A')}\n"
+                        f"Ruta: {session.get('video_path', 'N/A')}\n"
+                        f"Duración: {dur_str} | Segmentos: {session.get('total_segments', 0)}")
+                info_label.config(text=info)
+                
+        listbox.bind("<<ListboxSelect>>", on_select)
+        on_select(None)
+        
+    def _recover_video_session(self, session_data: dict):
+        """Recupera la sesión de video cargando sus segmentos."""
+        # Restaurar configuración de jerarquía si existe
+        if "great_grandparent" in session_data:
+            self.great_grandparent_deck.set(session_data["great_grandparent"])
+        if "grandparent" in session_data:
+            self.grandparent_deck.set(session_data["grandparent"])
+        if "father_prefix" in session_data:
+            self.parent_prefix.set(session_data["father_prefix"])
+            
+        self.clear_video_mode()
+        
+        self.current_video_path = session_data.get("video_path")
+        self.video_info_label.config(text=f"Recuperado: {session_data.get('original_video', 'Video')}")
+        
+        self.current_video_segments = []
+        folder = session_data.get("session_folder")
+        
+        for seg_data in session_data.get("segments", []):
+            seg = VideoSegment(
+                start_time=seg_data.get("start", 0),
+                end_time=seg_data.get("end", 0),
+                segment_id=seg_data.get("id", 0)
+            )
+            
+            # Reconstruir rutas completas
+            rel_audio = seg_data.get("audio_file")
+            if rel_audio:
+                audio_path = os.path.join(folder, "video_chunks", rel_audio)
+                if os.path.exists(audio_path):
+                    seg.audio_path = audio_path
+                    
+            rel_trans = seg_data.get("transcription_file")
+            if rel_trans:
+                trans_path = os.path.join(folder, "transcriptions", rel_trans)
+                if os.path.exists(trans_path):
+                    seg.transcription_path = trans_path
+                    # Cargar char count si no está
+                    try:
+                        with open(trans_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                            # Extraer solo el texto (ignorar comentarios)
+                            lines = [line for line in content.split('\n') if not line.startswith('#')]
+                            text = '\n'.join(lines).strip()
+                            seg.transcription_text = text
+                            seg.char_count = len(text)
+                    except Exception:
+                        seg.char_count = seg_data.get("char_count", 0)
+            
+            self.current_video_segments.append(seg)
+            
+        self._display_video_segments()
+        
+        # Habilitar botones adicionales
+        self.create_sections_btn.config(state="normal")
+        self.view_segments_btn.config(state="normal")
+        self.show_segments_window()
+        self.video_log(f"📁 Sesión de video recuperada con {len(self.current_video_segments)} segmentos.")
+
     def _recover_session(self, session_data: dict, replace: bool):
         """Recupera una sesión guardada."""
+        # Restaurar configuración de jerarquía si existe
+        if "great_grandparent" in session_data:
+            self.great_grandparent_deck.set(session_data["great_grandparent"])
+        if "grandparent" in session_data:
+            self.grandparent_deck.set(session_data["grandparent"])
+        if "father_prefix" in session_data:
+            self.parent_prefix.set(session_data["father_prefix"])
+            
         if replace:
             # Limpiar secciones actuales
             for section_id, widgets in list(self.section_widgets.items()):
@@ -2912,16 +4295,27 @@ class AnkiImportInterface:
     def _update_pending_button(self):
         """Actualiza el texto del botón de pendientes con la cantidad."""
         try:
-            if not self.flashcard_generator:
+            if not getattr(self, "flashcard_generator", None):
                 self.flashcard_generator = GeminiFlashcardGenerator(log_callback=self.auto_log)
             
             count = self.flashcard_generator.get_pending_count()
-            if count > 0:
-                self.pending_btn.config(text=f"📋 Importar Pendientes ({count})")
-            else:
-                self.pending_btn.config(text="📋 Importar Pendientes")
-        except:
-            pass
+            
+            # Update all pending buttons that might exist in different tabs
+            pending_buttons = []
+            if hasattr(self, "pending_btn"):
+                pending_buttons.append(self.pending_btn)
+            if hasattr(self, "pending_text_btn"):
+                pending_buttons.append(self.pending_text_btn)
+            if hasattr(self, "pending_video_btn"):
+                pending_buttons.append(self.pending_video_btn)
+                
+            for btn in pending_buttons:
+                if count > 0:
+                    btn.config(text=f"📋 Importar Pendientes ({count})")
+                else:
+                    btn.config(text="📋 Importar Pendientes")
+        except Exception as e:
+            self.auto_log(f"⚠️ Error al actualizar botón de pendientes: {e}")
     
     def import_pending_flashcards(self):
         """Importa las flashcards pendientes."""
@@ -3265,6 +4659,7 @@ class AnkiImportInterface:
             self.config_manager.update_set(set_name, updates)
             self.config_manager.set_active_set(set_name)
             self.active_set_label.config(text=f"Set: {set_name}")
+            self.refresh_all_section_indicators()
             messagebox.showinfo("Guardado", f"Set '{set_name}' guardado correctamente")
         
         def create_new_set():

@@ -24,27 +24,23 @@ except ImportError:
 # Cargar variables de entorno
 load_dotenv()
 
+# Carpeta maestra (debe coincidir con anki_import_interface.py)
+MASTER_FOLDER = "Flashcards Programa"
+
 # Archivo para flashcards pendientes de importar
-PENDING_FLASHCARDS_FILE = "pending_flashcards.json"
+PENDING_FLASHCARDS_FILE = os.path.join(MASTER_FOLDER, "pending_flashcards.json")
 
 
 class GeminiFlashcardGenerator:
     """Genera flashcards usando 5 APIs de Gemini (1 OCR + 4 flashcards)."""
     
     # Prompt para OCR con Gemini Vision
-    OCR_PROMPT = """CONTEXTO IMPORTANTE: Estas son fotografías de mis propios apuntes de clase y notas de estudio personal que he tomado durante mis clases universitarias. Necesito digitalizarlas para crear material de repaso personal.
+    OCR_PROMPT = """Actúa como un excelente estudiante universitario especializado, elaborando material de estudio integral basado en las imágenes y capturas proporcionadas. Tu instrucción ESTRICTA es integrar estructuradamente todo el texto, gráficos y esquemas presentes en las imágenes en un documento Markdown fluido. Debes detallar fielmente toda la información, pero también añadir observaciones, asociaciones y apuntes complementarios como un alumno brillante resaltando lo relevante. ESTÁ ESTRICTAMENTE PROHIBIDO SIMPLIFICAR O RESUMIR. Debes recuperar hasta el último detalle técnico válido. Estructura el resultado lógicamente con encabezados.
 
-Rol: Asistente de estudio que ayuda a digitalizar apuntes personales.
-
-Objetivo: Ayúdame a transcribir el contenido de mis apuntes/notas a formato Markdown limpio para poder estudiar mejor.
-
-Instrucciones de Transcripción:
-- Texto: Transcribe todo el texto legible de mis notas. Usa encabezados (#, ##) para respetar la jerarquía visual.
-- Tablas: Si hay tablas en mis apuntes, conviértelas a formato Markdown estándar (| Col1 | Col2 |).
-- Diagramas/Figuras: Si hay diagramas o esquemas que dibujé, describe brevemente qué representan: [DESCRIPCIÓN: diagrama que muestra X].
-- Corrección: Si hay palabras cortadas o errores de escritura, corrígelos para que el texto sea legible.
-
-Salida: Únicamente el texto transcrito en Markdown, sin comentarios adicionales."""
+**REGLAS ADICIONALES (SI APLICAN):**
+1. **RECREACIÓN DE CÓDIGO**: Si el contenido incluye fragmentos de **CÓDIGO, ESPECIFICACIONES TÉCNICAS o LOGS**, debes recrearlos **ÍNTEGRAMENTE**. No resumas, no trunques y no modifiques ni una sola línea de sintaxis. El código es sagrado y debe mantenerse exactamente igual al original, dentro de bloques de código Markdown adecuados.
+2. **REUNIONES Y NOTAS**: Identifica participantes, acuerdos, decisiones y puntos clave de acción, manteniendo el contexto técnico.
+3. **DOCUMENTACIÓN**: Mantiene la jerarquía y profundidad técnica original sin simplificar."""
 
     # Prompts para cada tipo de flashcard
     PROMPTS = {
@@ -172,7 +168,7 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         self.custom_prompts = self.config_set.get("prompts", {})
         
         self.api_keys = self._load_api_keys()
-        self.ocr_api_key = os.getenv("GEMINI_API_KEY_OCR")
+        self.ocr_api_keys = self._load_ocr_api_keys()
     
     def update_config(self, config_set: Dict):
         """Actualiza la configuración del generador."""
@@ -188,14 +184,23 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         # Detectar qué set de tipos usar basado en las keys del active_types
         self._detect_card_type_set()
     
-    def _load_api_keys(self) -> Dict[int, str]:
-        """Carga las API keys desde variables de entorno."""
+    def _load_api_keys(self) -> Dict[int, List[str]]:
+        """Carga las API keys desde variables de entorno soportando múltiples keys por índice."""
         keys = {}
         for i in range(1, 5):
-            key = os.getenv(f"GEMINI_API_KEY_{i}")
-            if key:
-                keys[i] = key
+            key_str = os.getenv(f"GEMINI_API_KEYS_{i}") or os.getenv(f"GEMINI_API_KEY_{i}")
+            if key_str:
+                key_list = [k.strip() for k in key_str.split(',') if k.strip()]
+                if key_list:
+                    keys[i] = key_list
         return keys
+
+    def _load_ocr_api_keys(self) -> List[str]:
+        """Carga las API keys para OCR."""
+        key_str = os.getenv(f"GEMINI_API_KEYS_OCR") or os.getenv(f"GEMINI_API_KEY_OCR")
+        if key_str:
+            return [k.strip() for k in key_str.split(',') if k.strip()]
+        return []
     
     def _detect_card_type_set(self):
         """Detecta si estamos usando tipos normales o niveles Bloom."""
@@ -212,8 +217,8 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
     
     def extract_text_from_images(self, image_paths: List[str]) -> str:
         """Extrae texto de todas las imágenes. Usa Gemini Vision, con Tesseract como fallback."""
-        if not self.ocr_api_key:
-            self._log("❌ API Key OCR no configurada en .env (GEMINI_API_KEY_OCR)")
+        if not self.ocr_api_keys:
+            self._log("❌ API Key OCR no configurada en .env (GEMINI_API_KEYS_OCR o GEMINI_API_KEY_OCR)")
             return ""
         
         # Cargar todas las imágenes primero
@@ -234,43 +239,46 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         # Lista de modelos a intentar (primero el configurado, luego los fallbacks)
         models_to_try = [self.model_name] + [m for m in self.FALLBACK_MODELS if m != self.model_name]
         
-        genai.configure(api_key=self.ocr_api_key)
-        
         for model_name in models_to_try:
-            try:
-                model = genai.GenerativeModel(model_name)
+            for api_idx, ocr_key in enumerate(self.ocr_api_keys):
+                genai.configure(api_key=ocr_key)
+                if len(self.ocr_api_keys) > 1:
+                    self._log(f"🔑 Intentando con API KEY OCR #{api_idx+1} para modelo {model_name}...")
                 
-                self._log(f"🚀 OCR con modelo: {model_name}...")
-                
-                # Construir el contenido: prompt + todas las imágenes
-                content = [self.OCR_PROMPT] + [img for _, img in images]
-                
-                response = model.generate_content(content)
-                
-                if response and response.text:
-                    text = response.text
-                    self._log(f"✅ OCR completado: {len(text)} caracteres extraídos")
-                    return text
-                else:
-                    self._log("⚠️ Respuesta vacía, probando siguiente modelo...")
-                    continue
+                try:
+                    model = genai.GenerativeModel(model_name)
                     
-            except Exception as e:
-                error_str = str(e).lower()
-                
-                # Detectar error de copyright - ir directo a Tesseract
-                if "copyrighted" in error_str or "finish_reason" in error_str:
-                    self._log(f"⚠️ Rechazado por copyright, usando Tesseract...")
-                    return self._extract_with_tesseract(images)
-                
-                # Detectar error de cuota - probar siguiente modelo
-                if "quota" in error_str or "429" in error_str or "resource" in error_str:
-                    self._log(f"⚠️ Cuota excedida en {model_name}, probando siguiente modelo...")
+                    self._log(f"🚀 OCR con modelo: {model_name}...")
+                    
+                    # Construir el contenido: prompt + todas las imágenes
+                    content = [self.OCR_PROMPT] + [img for _, img in images]
+                    
+                    response = model.generate_content(content)
+                    
+                    if response and response.text:
+                        text = response.text
+                        self._log(f"✅ OCR completado: {len(text)} caracteres extraídos")
+                        return text
+                    else:
+                        self._log("⚠️ Respuesta vacía, probando siguiente KEY o modelo...")
+                        continue
+                        
+                except Exception as e:
+                    error_str = str(e).lower()
+                    
+                    # Detectar error de copyright - ir directo a Tesseract
+                    if "copyrighted" in error_str or "finish_reason" in error_str:
+                        self._log(f"⚠️ Rechazado por copyright, usando Tesseract...")
+                        return self._extract_with_tesseract(images)
+                    
+                    # Detectar error de cuota - probar siguiente API KEY
+                    if "quota" in error_str or "429" in error_str or "resource" in error_str:
+                        self._log(f"⚠️ Cuota excedida en {model_name} con KEY #{api_idx+1}, probando siguiente...")
+                        continue
+                    
+                    # Otro error
+                    self._log(f"⚠️ Error con {model_name} y KEY #{api_idx+1}: {e}")
                     continue
-                
-                # Otro error - probar siguiente modelo
-                self._log(f"⚠️ Error con {model_name}: {e}")
-                continue
         
         # Si todos los modelos fallaron, usar Tesseract
         self._log(f"⚠️ Todos los modelos Gemini fallaron, usando Tesseract...")
@@ -287,8 +295,8 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         Returns:
             Texto estructurado y limpio
         """
-        if not self.ocr_api_key:
-            self._log("❌ API Key OCR no configurada en .env (GEMINI_API_KEY_OCR)")
+        if not self.ocr_api_keys:
+            self._log("❌ API Key OCR no configurada en .env (GEMINI_API_KEYS_OCR o GEMINI_API_KEY_OCR)")
             return ""
         
         if len(file_paths) > 10:
@@ -297,55 +305,56 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         
         self._log(f"📄 Procesando {len(file_paths)} archivos de texto...")
         
-        genai.configure(api_key=self.ocr_api_key)
-        
         # Lista de modelos a intentar
         models_to_try = [self.model_name] + [m for m in self.FALLBACK_MODELS if m != self.model_name]
         
         for model_name in models_to_try:
-            try:
-                model = genai.GenerativeModel(model_name)
+            for api_idx, ocr_key in enumerate(self.ocr_api_keys):
+                genai.configure(api_key=ocr_key)
                 
-                self._log(f"🚀 Procesando con modelo: {model_name}...")
-                
-                # Leer y preparar los archivos
-                content_parts = [self.OCR_PROMPT]
-                
-                for idx, file_path in enumerate(file_paths, 1):
-                    self._log(f"   📄 {idx}/{len(file_paths)}: {os.path.basename(file_path)}")
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            file_content = f.read()
-                            content_parts.append(f"\n\n--- Archivo {idx}: {os.path.basename(file_path)} ---\n{file_content}")
-                    except Exception as e:
-                        self._log(f"   ⚠️ Error leyendo archivo: {e}")
-                        continue
-                
-                # Combinar todo el contenido
-                combined_content = "\n".join(content_parts)
-                
-                # Generar respuesta
-                response = model.generate_content(combined_content)
-                
-                if response and response.text:
-                    text = response.text
-                    self._log(f"✅ Procesamiento completado: {len(text)} caracteres")
-                    return text
-                else:
-                    self._log("⚠️ Respuesta vacía, probando siguiente modelo...")
-                    continue
+                try:
+                    model = genai.GenerativeModel(model_name)
                     
-            except Exception as e:
-                error_str = str(e).lower()
-                
-                # Detectar error de cuota - probar siguiente modelo
-                if "quota" in error_str or "429" in error_str or "resource" in error_str:
-                    self._log(f"⚠️ Cuota excedida en {model_name}, probando siguiente modelo...")
+                    self._log(f"🚀 Procesando con modelo: {model_name} (KEY #{api_idx+1})...")
+                    
+                    # Leer y preparar los archivos
+                    content_parts = [self.OCR_PROMPT]
+                    
+                    for idx, file_path in enumerate(file_paths, 1):
+                        self._log(f"   📄 {idx}/{len(file_paths)}: {os.path.basename(file_path)}")
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                file_content = f.read()
+                                content_parts.append(f"\n\n--- Archivo {idx}: {os.path.basename(file_path)} ---\n{file_content}")
+                        except Exception as e:
+                            self._log(f"   ⚠️ Error leyendo archivo: {e}")
+                            continue
+                    
+                    # Combinar todo el contenido
+                    combined_content = "\n".join(content_parts)
+                    
+                    # Generar respuesta
+                    response = model.generate_content(combined_content)
+                    
+                    if response and response.text:
+                        text = response.text
+                        self._log(f"✅ Procesamiento completado: {len(text)} caracteres")
+                        return text
+                    else:
+                        self._log("⚠️ Respuesta vacía, probando siguiente KEY o modelo...")
+                        continue
+                        
+                except Exception as e:
+                    error_str = str(e).lower()
+                    
+                    # Detectar error de cuota - probar siguiente API KEY
+                    if "quota" in error_str or "429" in error_str or "resource" in error_str:
+                        self._log(f"⚠️ Cuota excedida en {model_name} con KEY #{api_idx+1}, probando siguiente...")
+                        continue
+                    
+                    # Otro error - probar siguiente KEY / modelo
+                    self._log(f"⚠️ Error con {model_name} (KEY #{api_idx+1}): {e}")
                     continue
-                
-                # Otro error - probar siguiente modelo
-                self._log(f"⚠️ Error con {model_name}: {e}")
-                continue
         
         # Si todos los modelos fallaron, concatenar el texto sin procesar
         self._log(f"⚠️ Todos los modelos fallaron, concatenando texto sin procesar...")
@@ -425,19 +434,22 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         """Verifica la conexión con una API de Gemini."""
         try:
             if api_index == 0:  # OCR API
-                api_key = self.ocr_api_key
+                keys = self.ocr_api_keys
                 label = "OCR"
             else:
-                api_key = self.api_keys.get(api_index)
+                keys = self.api_keys.get(api_index, [])
                 label = f"API {api_index}"
             
-            if not api_key:
+            if not keys:
                 self._log(f"❌ {label} no configurada")
                 return False
             
+            # Verificamos la primera llave disponible
+            api_key = keys[0]
             genai.configure(api_key=api_key)
             models = list(genai.list_models())
-            self._log(f"✅ {label} conectada ({len(models)} modelos)")
+            label_plus = f"{label} ({len(keys)} keys)" if len(keys) > 1 else label
+            self._log(f"✅ {label_plus} conectada ({len(models)} modelos en validación)")
             return True
         except Exception as e:
             self._log(f"❌ Error {label}: {e}")
@@ -457,15 +469,12 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         return results
     
     def generate_flashcards_single(self, texto_ocr: str, card_type: str) -> Dict[str, Any]:
-        """Genera flashcards de un tipo específico usando su API asignada, con fallback de modelos."""
+        """Genera flashcards de un tipo específico usando su API asignada, con fallback de keys y modelos."""
         api_index = self.TYPE_TO_API_INDEX.get(card_type, 1)
-        api_key = self.api_keys.get(api_index)
+        keys_list = self.api_keys.get(api_index, [])
         
-        if not api_key:
+        if not keys_list:
             return {"success": False, "error": f"API Key {api_index} no configurada", "type": card_type}
-        
-        # Configurar con la API key específica para este tipo
-        genai.configure(api_key=api_key)
         
         # Usar prompt personalizado si existe, sino buscar en los defaults
         base_prompt = self.custom_prompts.get(card_type)
@@ -483,40 +492,45 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         models_to_try = [self.model_name] + [m for m in self.FALLBACK_MODELS if m != self.model_name]
         
         for model_name in models_to_try:
-            try:
-                model = genai.GenerativeModel(model_name)
+            for key_idx, current_key in enumerate(keys_list):
+                # Configurar globalmente la API key ACTUAL
+                genai.configure(api_key=current_key)
                 
-                self._log(f"🤖 [{card_type.upper()}] API {api_index} | Modelo: {model_name}...")
-                response = model.generate_content(prompt)
-                
-                if response and response.text:
-                    self._log(f"✅ [{card_type.upper()}] Respuesta recibida ({len(response.text)} chars)")
-                    return {
-                        "success": True,
-                        "type": card_type,
-                        "content": response.text,
-                        "api_index": api_index,
-                        "model_used": model_name
-                    }
-                else:
-                    self._log(f"⚠️ [{card_type.upper()}] Respuesta vacía, probando siguiente modelo...")
-                    continue
+                try:
+                    model = genai.GenerativeModel(model_name)
                     
-            except Exception as e:
-                error_str = str(e).lower()
-                
-                # Detectar error de cuota - probar siguiente modelo
-                if "quota" in error_str or "429" in error_str or "resource" in error_str:
-                    self._log(f"⚠️ [{card_type.upper()}] Cuota excedida en {model_name}, probando siguiente...")
+                    key_label = f"KEY #{key_idx+1}" if len(keys_list) > 1 else ""
+                    self._log(f"🤖 [{card_type.upper()}] API {api_index} {key_label} | Modelo: {model_name}...")
+                    response = model.generate_content(prompt)
+                    
+                    if response and response.text:
+                        self._log(f"✅ [{card_type.upper()}] Respuesta recibida ({len(response.text)} chars)")
+                        return {
+                            "success": True,
+                            "type": card_type,
+                            "content": response.text,
+                            "api_index": api_index,
+                            "model_used": model_name
+                        }
+                    else:
+                        self._log(f"⚠️ [{card_type.upper()}] Respuesta vacía, probando siguiente KEY o modelo...")
+                        continue
+                        
+                except Exception as e:
+                    error_str = str(e).lower()
+                    
+                    # Detectar error de cuota -> intentar siguiente API KEY
+                    if "quota" in error_str or "429" in error_str or "resource" in error_str:
+                        self._log(f"⚠️ [{card_type.upper()}] Cuota excedida en {model_name} con KEY #{key_idx+1}, buscando reemplazo...")
+                        continue
+                    
+                    # Otro error -> intentar siguiente KEY / modelo
+                    self._log(f"⚠️ [{card_type.upper()}] Error con {model_name} / KEY #{key_idx+1}: {e}")
                     continue
-                
-                # Otro error - probar siguiente modelo
-                self._log(f"⚠️ [{card_type.upper()}] Error con {model_name}: {e}")
-                continue
         
-        # Si todos los modelos fallaron
-        self._log(f"❌ [{card_type.upper()}] Todos los modelos fallaron")
-        return {"success": False, "error": "Todos los modelos fallaron por cuota", "type": card_type}
+        # Si todos los modelos y keys fallaron
+        self._log(f"❌ [{card_type.upper()}] Todos los modelos y API keys fallaron")
+        return {"success": False, "error": "Todos los modelos y llaves fallaron por cuota o error", "type": card_type}
 
     def generate_all_flashcards_parallel(self, texto_ocr: str) -> Dict[str, Dict[str, Any]]:
         """
@@ -605,6 +619,53 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
                     })
         
         return flashcards
+
+    def _save_ocr_transcript(self, text_content: str, grandparent_deck: str, section_title: str, 
+                             subfolder: Optional[str] = None, extension: str = "txt"):
+        """
+        Guarda el texto (OCR, Transcripción, Notas) en un archivo.
+        Maneja jerarquía de carpetas y evita duplicados.
+        """
+        if not text_content or not text_content.strip():
+            return
+            
+        # Base folder: Mazo Abuelo o sesión actual
+        base_folder = grandparent_deck.strip() if grandparent_deck.strip() else "General"
+        
+        # Target folder (with optional subfolder)
+        target_folder = base_folder
+        if subfolder:
+            target_folder = os.path.join(base_folder, subfolder)
+        
+        # Crear la carpeta si no existe
+        if not os.path.exists(target_folder):
+            try:
+                os.makedirs(target_folder, exist_ok=True)
+            except Exception as e:
+                self._log(f"   ⚠️ No se pudo crear la carpeta '{target_folder}': {e}")
+                return
+                
+        # Limpiar el nombre de la sección
+        safe_title = "".join(c for c in section_title if c.isalnum() or c in " -_").strip()
+        if not safe_title:
+            safe_title = "Sin_Nombre"
+            
+        base_path = os.path.join(target_folder, f"{safe_title}.{extension}")
+        file_path = base_path
+        
+        # Manejar duplicados
+        counter = 1
+        while os.path.exists(file_path):
+            file_path = os.path.join(target_folder, f"{safe_title} ({counter}).{extension}")
+            counter += 1
+            
+        # Escribir contenido
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(text_content.strip())
+            self._log(f"   💾 Guardado en: '{file_path}'")
+        except Exception as e:
+            self._log(f"   ⚠️ Error al guardar en '{file_path}': {e}")
 
     def _import_to_anki_with_retry(self, anki_manager, deck_name: str, 
                                     flashcards: list, card_type: str,
@@ -779,38 +840,49 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         return 0
 
     def process_video_section(self, section_title: str, transcription_paths: List[str], 
-                             converter, anki_manager, deck_prefix: str) -> Dict[str, Any]:
+                             converter, anki_manager, deck_prefix: str,
+                             session_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Procesa una sección de video completa: OCR de transcripciones → APIs → Conversión → Importación Anki.
-        
-        Args:
-            section_title: Título de la sección
-            transcription_paths: Lista de rutas a archivos .txt con transcripciones (máx 10)
-            converter: FlashcardsConverter
-            anki_manager: AnkiSyncManager
-            deck_prefix: Prefijo para los mazos de Anki
-            
-        Returns:
-            Dict con resultados del procesamiento
         """
         self._log(f"\n{'='*60}")
         self._log(f"📁 PROCESANDO SECCIÓN DE VIDEO: {section_title}")
         self._log(f"{'='*60}")
         self._log(f"   📄 Transcripciones: {len(transcription_paths)}")
         
-        # Paso 1: Procesar transcripciones con Gemini OCR
-        self._log("\n📖 PASO 1: PROCESAMIENTO DE TRANSCRIPCIONES CON GEMINI")
-        texto_estructurado = self.extract_text_from_files(transcription_paths)
+        # Paso 1: Procesar transcripciones
+        self._log("\n📖 PASO 1: LECTURA DE TRANSCRIPCIONES (Modo Concatenación)")
+        
+        combined_parts = []
+        for idx, file_path in enumerate(transcription_paths, 1):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        combined_parts.append(f"--- Segmento {idx}: {os.path.basename(file_path)} ---\n{content}")
+            except Exception as e:
+                self._log(f"   ⚠️ Error leyendo {os.path.basename(file_path)}: {e}")
+                
+        texto_estructurado = "\n\n".join(combined_parts)
         
         if not texto_estructurado.strip():
-            self._log("❌ No se pudo procesar las transcripciones")
-            return {"success": False, "error": "No text extracted", "section": section_title}
+            self._log("❌ No se pudo leer ninguna transcripción")
+            return {"success": False, "error": "No text content found", "section": section_title}
+            
+        # Determinar mazo base para guardado
+        parts = deck_prefix.split("::")
+        grandparent_name = parts[0] if len(parts) > 1 else ""
+        save_base = session_path if session_path else grandparent_name
         
-        # Paso 2: Generar flashcards con las APIs (secuencial)
+        # Guardar transcripción de la sección (Expert Notes)
+        self._save_ocr_transcript(texto_estructurado, save_base, f"{section_title}_Expert_Notes", 
+                                  subfolder="expert_notes", extension="md")
+        
+        # Paso 2: Generar flashcards
         self._log("\n🤖 PASO 2: GENERACIÓN SECUENCIAL CON GEMINI")
         api_results = self.generate_all_flashcards_sequential(texto_estructurado)
         
-        # Paso 3: Convertir e importar a Anki
+        # Paso 3: Convertir e importar
         self._log("\n📥 PASO 3: CONVERSIÓN E IMPORTACIÓN A ANKI")
         import_results = {}
         
@@ -819,7 +891,6 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
             "multiple_choice": "Multiple Choice", 
             "cloze": "Cloze",
             "vocabulary": "Vocabulary",
-            # Niveles Bloom
             "level_1_cloze": "Nivel 1 - Cloze",
             "level_2_relations": "Nivel 2 - Relaciones",
             "level_3_application": "Nivel 3 - Aplicación",
@@ -828,37 +899,34 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         
         for card_type, result in api_results.items():
             if not result.get("success"):
-                self._log(f"   ⚠️ [{card_type}] Saltando - Error en generación")
                 import_results[card_type] = {"success": False, "error": result.get("error")}
                 continue
             
             content = result.get("content", "")
-            deck_name = f"{deck_prefix} - {type_labels[card_type]}"
+            deck_name = f"{deck_prefix}::{type_labels.get(card_type, card_type)}"
             
             try:
-                # Convertir a formato TSV
                 tsv_content = converter.convert(content, card_type)
-                
                 if not tsv_content:
-                    self._log(f"   ⚠️ [{card_type}] No se pudieron parsear flashcards")
                     import_results[card_type] = {"success": False, "error": "Parse failed"}
                     continue
                 
-                # Parsear flashcards para Anki
                 flashcards = self._parse_tsv_to_flashcards(tsv_content)
-                
                 if not flashcards:
-                    self._log(f"   ⚠️ [{card_type}] Lista de flashcards vacía")
                     import_results[card_type] = {"success": False, "error": "Empty flashcards"}
                     continue
                 
-                # Importar a Anki con reintentos
+                # Guardar respaldo de flashcards con sufijo de tipo
+                self._save_ocr_transcript(tsv_content, save_base, f"{section_title}_{card_type}", 
+                                          subfolder="flashcards")
+                
+                # Importar a Anki
                 success, msg, count = self._import_to_anki_with_retry(
                     anki_manager, deck_name, flashcards, card_type
                 )
                 
                 if success:
-                    self._log(f"   ✅ [{card_type}] {count} flashcards importadas a '{deck_name}'")
+                    self._log(f"   ✅ [{card_type}] {count} flashcards importadas")
                     import_results[card_type] = {"success": True, "count": count, "deck": deck_name}
                 else:
                     self._log(f"   ❌ [{card_type}] Error: {msg}")
@@ -871,12 +939,12 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         return {
             "success": True,
             "section": section_title,
-            "text_length": len(texto_estructurado),
             "results": import_results
         }
     
     def process_section(self, section_title: str, image_paths: List[str], 
-                       converter, anki_manager, deck_prefix: str) -> Dict[str, Any]:
+                       converter, anki_manager, deck_prefix: str,
+                       session_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Procesa una sección completa: OCR → 4 APIs → Conversión → Importación Anki.
         """
@@ -892,12 +960,21 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         if not texto_ocr.strip():
             self._log("❌ No se pudo extraer texto de las imágenes")
             return {"success": False, "error": "No text extracted", "section": section_title}
+            
+        # Determinar mazo base para guardado
+        parts = deck_prefix.split("::")
+        grandparent_name = parts[0] if len(parts) > 1 else ""
+        save_base = session_path if session_path else grandparent_name
         
-        # Paso 2: Generar flashcards con las 4 APIs
+        # Guardar respaldo del OCR (Expert Notes / Transcript)
+        self._save_ocr_transcript(texto_ocr, save_base, f"{section_title}_Expert_Notes", 
+                                  subfolder="expert_notes", extension="md")
+        
+        # Paso 2: Generar flashcards
         self._log("\n🤖 PASO 2: GENERACIÓN CON GEMINI (4 APIs en paralelo)")
         api_results = self.generate_all_flashcards_parallel(texto_ocr)
         
-        # Paso 3: Convertir e importar a Anki
+        # Paso 3: Convertir e importar
         self._log("\n📥 PASO 3: CONVERSIÓN E IMPORTACIÓN A ANKI")
         import_results = {}
         
@@ -906,7 +983,6 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
             "multiple_choice": "Multiple Choice", 
             "cloze": "Cloze",
             "vocabulary": "Vocabulary",
-            # Niveles Bloom
             "level_1_cloze": "Nivel 1 - Cloze",
             "level_2_relations": "Nivel 2 - Relaciones",
             "level_3_application": "Nivel 3 - Aplicación",
@@ -915,37 +991,34 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         
         for card_type, result in api_results.items():
             if not result.get("success"):
-                self._log(f"   ⚠️ [{card_type}] Saltando - Error en generación")
                 import_results[card_type] = {"success": False, "error": result.get("error")}
                 continue
             
             content = result.get("content", "")
-            deck_name = f"{deck_prefix} - {type_labels[card_type]}"
+            deck_name = f"{deck_prefix}::{type_labels.get(card_type, card_type)}"
             
             try:
-                # Convertir a formato TSV
                 tsv_content = converter.convert(content, card_type)
-                
                 if not tsv_content:
-                    self._log(f"   ⚠️ [{card_type}] No se pudieron parsear flashcards")
                     import_results[card_type] = {"success": False, "error": "Parse failed"}
                     continue
                 
-                # Parsear flashcards para Anki
                 flashcards = self._parse_tsv_to_flashcards(tsv_content)
-                
                 if not flashcards:
-                    self._log(f"   ⚠️ [{card_type}] Lista de flashcards vacía")
                     import_results[card_type] = {"success": False, "error": "Empty flashcards"}
                     continue
                 
-                # Importar a Anki con reintentos
+                # Guardar respaldo de flashcards con sufijo de tipo
+                self._save_ocr_transcript(tsv_content, save_base, f"{section_title}_{card_type}", 
+                                          subfolder="flashcards")
+                
+                # Importar a Anki
                 success, msg, count = self._import_to_anki_with_retry(
                     anki_manager, deck_name, flashcards, card_type
                 )
                 
                 if success:
-                    self._log(f"   ✅ [{card_type}] {count} flashcards importadas a '{deck_name}'")
+                    self._log(f"   ✅ [{card_type}] {count} flashcards importadas")
                     import_results[card_type] = {"success": True, "count": count, "deck": deck_name}
                 else:
                     self._log(f"   ❌ [{card_type}] Error: {msg}")
@@ -963,7 +1036,10 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
         }
 
     def process_all_sections(self, sections: List[Dict], converter, anki_manager,
-                            progress_callback: Optional[Callable[[str, int, int], None]] = None) -> List[Dict]:
+                            bisabuelo_str: str = "",
+                            grandparent_str: str = "",
+                            progress_callback: Optional[Callable[[str, int, int], None]] = None,
+                            session_path: Optional[str] = None) -> List[Dict]:
         """
         Procesa todas las secciones secuencialmente con espera de 1 minuto entre cada una.
         """
@@ -978,12 +1054,20 @@ R: [Aquí va la Respuesta / Solución / Definición / Contexto]
                 progress_callback(title, idx, total)
             
             # Procesar sección
+            prefix = ""
+            if bisabuelo_str:
+                prefix += f"{bisabuelo_str}::"
+            if grandparent_str:
+                prefix += f"{grandparent_str}::"
+            prefix += f"{title}"
+            
             result = self.process_section(
                 section_title=title,
                 image_paths=image_paths,
                 converter=converter,
                 anki_manager=anki_manager,
-                deck_prefix=title
+                deck_prefix=prefix,
+                session_path=session_path
             )
             results.append(result)
             

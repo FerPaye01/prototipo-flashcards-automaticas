@@ -1,0 +1,1 @@
+gemini-3.1-flash-lite-preview, gemini-2.5-flash , gemini-3-flash-preview  estos modelos son llos que acutalmente pueden ser utilizados colocalos en un archivo

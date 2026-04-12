@@ -12,12 +12,14 @@ from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
 import shutil
 
-# Whisper para transcripción
-try:
-    import whisper
-    WHISPER_AVAILABLE = True
-except ImportError:
-    WHISPER_AVAILABLE = False
+# Gemini API para transcripción multimodal
+import time
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # audio_extract para extracción de audio
 try:
@@ -114,13 +116,20 @@ class VideoProcessor:
     SUPPORTED_FORMATS = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.mov')
     
     # Directorio temporal
-    TEMP_DIR = "temp_videos"
+    TEMP_DIR = os.path.join("Flashcards Programa", "temp_videos")
     
     def __init__(self, log_callback: Optional[Callable[[str], None]] = None):
         """Inicializa el procesador."""
         self.log_callback = log_callback or print
-        self.whisper_model = None
         self._ensure_temp_dir()
+        
+        # Cargar API Keys de Gemini
+        self.api_keys = []
+        keys_str = os.environ.get("GEMINI_API_KEYS_OCR", "")
+        if keys_str:
+            self.api_keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+            
+        self.current_key_index = 0
     
     def _log(self, message: str):
         """Registra un mensaje."""
@@ -186,14 +195,26 @@ class VideoProcessor:
             except Exception as e:
                 self._log(f"⚠️ imageio no pudo leer duración: {e}")
         
-        # Método 2: Usar audio_extract con el video completo
+        # Método 2: Usar mutagen (si está disponible)
+        try:
+            import mutagen
+            file = mutagen.File(video_path)
+            if file is not None and hasattr(file, 'info') and hasattr(file.info, 'length'):
+                duration = file.info.length
+                if duration > 0:
+                    return duration
+        except Exception as e:
+            self._log(f"⚠️ mutagen no pudo leer duración: {e}")
+            
+        # Método 3: Usar audio_extract con el video completo
         if AUDIO_EXTRACT_AVAILABLE:
             try:
                 import tempfile
                 import wave
                 
+                self._ensure_temp_dir()
                 # Extraer audio completo para obtener duración
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                with tempfile.NamedTemporaryFile(suffix='.wav', dir=self.TEMP_DIR, delete=False) as tmp:
                     tmp_path = tmp.name
                 
                 extract_audio(
@@ -208,7 +229,15 @@ class VideoProcessor:
                         frames = wav_file.getnframes()
                         rate = wav_file.getframerate()
                         duration = frames / rate
-                    os.remove(tmp_path)
+                    
+                    # Intentar eliminar, pero no fallar si Windows lo tiene bloqueado
+                    try:
+                        import time
+                        time.sleep(0.1) # Pequeña pausa para permitir que Windows libere el handle
+                        os.remove(tmp_path)
+                    except Exception as removal_error:
+                        self._log(f"⚠️ No se pudo eliminar el archivo temporal {tmp_path}: {removal_error}")
+                    
                     return duration
             except Exception as e:
                 self._log(f"⚠️ audio_extract no pudo obtener duración: {e}")
@@ -219,51 +248,91 @@ class VideoProcessor:
         self._log(f"⚠️ Usando duración estimada: {estimated_duration/60:.1f} min")
         return estimated_duration
     
-    def load_whisper_model(self, model_size: str = "base"):
-        """
-        Carga el modelo de Whisper.
+    def _get_gemini_client(self):
+        """Devuelve el cliente Gemini usando la API Key actual."""
+        if not self.api_keys:
+            return genai.Client()
+        return genai.Client(api_key=self.api_keys[self.current_key_index])
+
+    def _upload_file_with_retry(self, client, file_path: str, max_retries: int = 5, initial_delay: float = 2.0):
+        """Sube un archivo a Gemini con reintentos para fallas de red."""
+        last_exception = None
+        delay = initial_delay
         
-        Args:
-            model_size: tiny, base, small, medium, large
-        """
-        if not WHISPER_AVAILABLE:
-            raise ImportError("Whisper no está instalado. Ejecuta: pip install openai-whisper")
+        for attempt in range(max_retries):
+            try:
+                return client.files.upload(file=file_path)
+            except Exception as e:
+                last_exception = e
+                error_str = str(e)
+                # Detectar errores comunes de conexión (incluyendo 10054)
+                is_connection_error = any(msg in error_str.lower() for msg in [
+                    "connection", "10054", "reset", "broken pipe", "timeout", "network"
+                ])
+                
+                if is_connection_error:
+                    remaining = max_retries - attempt - 1
+                    if remaining > 0:
+                        self._log(f"   ⚠️ Error de conexión al subir ({error_str}). Reintentando en {delay}s... ({remaining} intentos restantes)")
+                        time.sleep(delay)
+                        delay *= 2  # Backoff exponencial
+                        continue
+                
+                # Si no es un error de conexión conocido o no quedan intentos, propagar
+                self._log(f"   ❌ Error crítico subiendo a Gemini: {e}")
+                raise e
         
-        if self.whisper_model is None:
-            self._log(f"🔄 Cargando modelo Whisper '{model_size}'...")
-            self.whisper_model = whisper.load_model(model_size)
-            self._log(f"✅ Modelo Whisper cargado")
-    
-    def transcribe_video(self, video_path: str, language: str = "es") -> Dict[str, Any]:
-        """
-        Transcribe el audio del video usando Whisper.
+        raise last_exception
+
+    def _rotate_api_key(self) -> bool:
+        """Rota a la siguiente API key. Retorna True si rotó, False si dio la vuelta."""
+        if not self.api_keys:
+            return False
+        self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+        return self.current_key_index != 0
+
+    def _generate_with_fallback(self, file_obj, prompt: str) -> str:
+        """Genera contenido usando fallback de modelos con reintentos por rate limit.
         
-        Args:
-            video_path: Ruta al video
-            language: Código de idioma (es, en, etc.)
+        IMPORTANTE: Los archivos subidos a Gemini están vinculados a la API Key
+        que los subió. NO se puede rotar a otra key para acceder al mismo archivo.
+        En su lugar, se espera y reintenta con la misma key.
+        """
+        models = [os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview"), "gemini-2.5-flash"]
+        max_retries = 3  # Reintentos por rate limit por modelo
+        
+        for model_name in models:
+            self._log(f"   🤖 Intentando con modelo {model_name}...")
             
-        Returns:
-            Dict con transcripción y timestamps
-        """
-        self.load_whisper_model()
+            for attempt in range(max_retries):
+                client = self._get_gemini_client()
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[file_obj, prompt]
+                    )
+                    return response.text
+                except Exception as e:
+                    error_str = str(e).lower()
+                    
+                    if "429" in error_str or "quota" in error_str or "exhausted" in error_str:
+                        wait_time = 30 * (attempt + 1)  # 30s, 60s, 90s
+                        remaining = max_retries - attempt - 1
+                        if remaining > 0:
+                            self._log(f"   ⏳ Rate limit alcanzado. Esperando {wait_time}s antes de reintentar ({remaining} intentos restantes)...")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            self._log(f"   ❌ Rate limit persistente para {model_name} tras {max_retries} intentos.")
+                            break  # Probar el siguiente modelo
+                    elif "permission_denied" in error_str or "403" in error_str:
+                        self._log(f"   ❌ Permiso denegado para {model_name} (archivo no accesible con esta key): {e}")
+                        break  # No tiene sentido reintentar, probar siguiente modelo
+                    else:
+                        self._log(f"   ❌ Error de Gemini ({model_name}): {e}")
+                        break  # Si es otro error, probar el siguiente modelo
         
-        self._log("🎤 Transcribiendo audio con Whisper...")
-        
-        try:
-            result = self.whisper_model.transcribe(
-                video_path,
-                language=language,
-                word_timestamps=True,
-                verbose=False
-            )
-            
-            self._log(f"✅ Transcripción completada: {len(result['text'])} caracteres")
-            
-            return result
-        
-        except Exception as e:
-            self._log(f"❌ Error en transcripción: {e}")
-            return None
+        raise Exception("Todos los modelos y API keys fallaron.")
     
     def segment_by_fixed_duration(
         self,
@@ -448,14 +517,14 @@ class VideoProcessor:
         
         return segments
     
-    def extract_audio_segment(
+    def extract_video_segment(
         self,
         video_path: str,
         segment: VideoSegment,
         output_dir: str
     ) -> str:
         """
-        Extrae el audio de un segmento del video como MP3.
+        Extrae un chunk de video (MP4) usando copia directa de streams.
         
         Args:
             video_path: Ruta al video original
@@ -463,16 +532,12 @@ class VideoProcessor:
             output_dir: Directorio de salida
             
         Returns:
-            Ruta al archivo de audio MP3
+            Ruta al archivo de video MP4 extraído
         """
         output_path = os.path.join(
             output_dir,
-            f"segment_{segment.segment_id:03d}.mp3"
+            f"segment_{segment.segment_id:03d}.mp4"
         )
-        
-        if not AUDIO_EXTRACT_AVAILABLE:
-            self._log(f"❌ audio_extract no está instalado. Ejecuta: pip install audio-extract")
-            return None
         
         try:
             # Calcular tiempo de inicio en formato HH:MM:SS
@@ -480,59 +545,104 @@ class VideoProcessor:
                         str(int((segment.start_time % 3600) // 60)).zfill(2) + ":" + \
                         str(int(segment.start_time % 60)).zfill(2)
             
-            # Usar audio_extract para extraer el segmento de audio
-            extract_audio(
-                input_path=video_path,
-                output_path=output_path,
-                output_format='mp3',
-                start_time=start_time,
-                duration=segment.duration,
-                overwrite=True
-            )
+            # Construir y ejecutar el comando ffmpeg directamente con '-c copy'
+            cmd = [
+                'ffmpeg',
+                '-y',  # Sobrescribir
+                '-i', video_path,
+                '-ss', start_time,
+                '-t', str(segment.duration),
+                '-c', 'copy',
+                output_path
+            ]
+            
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            if result.returncode != 0:
+                self._log(f"❌ Error de ffmpeg: {result.stderr.decode('utf-8', errors='ignore')[-200:]}")
+                return None
             
             if os.path.exists(output_path):
-                segment.audio_path = output_path
+                segment.audio_path = output_path # Mantener la propiedad para compatibilidad
                 return output_path
             else:
-                self._log(f"❌ No se pudo extraer audio del segmento {segment.segment_id}")
+                self._log(f"❌ No se pudo extraer video del segmento {segment.segment_id}")
                 return None
         
         except Exception as e:
-            self._log(f"❌ Error extrayendo audio del segmento {segment.segment_id}: {e}")
+            self._log(f"❌ Error extrayendo video del segmento {segment.segment_id}: {e}")
             return None
     
-    def transcribe_segment(
+    def transcribe_video_segment(
         self,
         segment: VideoSegment,
-        language: str = "es"
+        language: str = "es",
+        pre_uploaded_file=None,
+        skip_cleanup: bool = False
     ) -> str:
         """
-        Transcribe un segmento de audio usando Whisper.
+        Transcribe un segmento de video completo usando Gemini Multimodal.
         
         Args:
-            segment: VideoSegment con audio_path
-            language: Código de idioma
+            segment: VideoSegment con audio_path (ahora es un MP4)
+            language: Código de idioma (Omitido para Gemini, que detecta automático)
+            pre_uploaded_file: Objeto de archivo de Gemini si ya se subió y procesó previamente
+            skip_cleanup: Si es True, no elimina el archivo de la API después de transcribir
             
         Returns:
             Texto de la transcripción
         """
-        if not segment.audio_path or not os.path.exists(segment.audio_path):
-            self._log(f"❌ No se encontró audio para segmento {segment.segment_id}")
+        if not pre_uploaded_file and (not segment.audio_path or not os.path.exists(segment.audio_path)):
+            self._log(f"❌ No se encontró video para segmento {segment.segment_id}")
             return ""
         
-        self.load_whisper_model()
-        
         try:
-            result = self.whisper_model.transcribe(
-                segment.audio_path,
-                language=language,
-                verbose=False
+            client = self._get_gemini_client()
+            
+            if pre_uploaded_file:
+                myfile = pre_uploaded_file
+            else:
+                self._log(f"   ⬆ Subiendo a Gemini: {os.path.basename(segment.audio_path)}...")
+                myfile = self._upload_file_with_retry(client, segment.audio_path)
+                
+                self._log(f"   ⏳ Esperando procesamiento en la nube...")
+                while myfile.state.name == "PROCESSING":
+                    time.sleep(3)
+                    myfile = client.files.get(name=myfile.name)
+                    
+                if myfile.state.name == "FAILED":
+                    self._log(f"   ❌ Falla en servidor de Gemini.")
+                    return ""
+                
+            prompt = (
+                "Actúa como un excelente estudiante universitario especializado, elaborando "
+                "material de estudio integral basado en el contenido audiovisual proporcionado. "
+                "Recibes la imagen del video de manera sincronizada con la voz. "
+                "Tu instrucción ESTRICTA es integrar y consolidar paso a paso todo el conocimiento visual "
+                "(diapositivas, esquemas, ejemplos en pantalla) que aparezca a lo largo del tiempo, "
+                "en conjunto cronológico con las explicaciones verbales exactas del ponente. "
+                "Debes añadir observaciones y apuntes complementarios como estudiante resaltando "
+                "lo relevante del contenido, todo con la mejor ortografía y puntuación posibles en español. "
+                "ESTÁ ESTRICTAMENTE PROHIBIDO SIMPLIFICAR O RESUMIR; no debes perder información sin importar "
+                "qué tan largo sea. Debes recuperar hasta el último detalle técnico válido mostrado o dicho. "
+                "ADICIONALMENTE: Si detectas fragmentos de CÓDIGO o ESPECIFICACIONES TÉCNICAS, debes recrearlos "
+                "ÍNTEGRAMENTE sin modificar ni una sola línea de sintaxis. Si es una REUNIÓN, identifica participantes y acuerdos."
             )
             
-            transcription_text = result['text'].strip()
+            self._log(f"   🧠 Generando transcripción multimodal...")
+            transcription_text = self._generate_with_fallback(myfile, prompt)
+            transcription_text = transcription_text.strip() if transcription_text else ""
+            
             segment.transcription_text = transcription_text
             segment.char_count = len(transcription_text)
             
+            # Limpiar archivo de la API por sanidad (si no se omite)
+            if not skip_cleanup:
+                try:
+                    client.files.delete(name=myfile.name)
+                except Exception:
+                    pass
+                
             return transcription_text
         
         except Exception as e:
@@ -583,7 +693,12 @@ class VideoProcessor:
         overlap: float = 30,
         use_silence_detection: bool = False,
         use_transcription_analysis: bool = True,
-        language: str = "es"
+        language: str = "es",
+        model_size: str = "base",
+        on_segment_complete: Optional[Callable[["VideoSegment"], None]] = None,
+        great_grandparent: str = "",
+        grandparent: str = "",
+        father_prefix: str = ""
     ) -> Dict[str, Any]:
         """
         Procesa un video completo: valida, segmenta, extrae audio y transcribe.
@@ -613,23 +728,20 @@ class VideoProcessor:
         
         # 2. Obtener duración
         try:
-            if IMAGEIO_AVAILABLE:
-                reader = imageio.get_reader(video_path)
-                video_duration = reader.get_meta_data()['duration']
-                reader.close()
-            else:
-                # Fallback: estimar duración por tamaño
+            video_duration = self._get_video_duration(video_path)
+            if video_duration is None:
                 video_duration = os.path.getsize(video_path) / (1024 * 1024) * 60
-                self._log("⚠️ Usando estimación de duración")
+                self._log("⚠️ Usando estimación de duración debido a fallo en lectura")
+                
         except Exception as e:
             return {"success": False, "error": f"No se pudo obtener duración del video: {e}"}
         
         # 3. Crear sesión temporal
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_dir = os.path.join(self.TEMP_DIR, f"session_{session_id}")
-        audio_dir = os.path.join(session_dir, "audio")
+        video_chunks_dir = os.path.join(session_dir, "video_chunks")
         transcriptions_dir = os.path.join(session_dir, "transcriptions")
-        os.makedirs(audio_dir, exist_ok=True)
+        os.makedirs(video_chunks_dir, exist_ok=True)
         os.makedirs(transcriptions_dir, exist_ok=True)
         
         # 4. Determinar puntos de corte (segmentación fija por ahora)
@@ -643,26 +755,84 @@ class VideoProcessor:
         
         self._log(f"   Total de segmentos: {len(segments)}")
         
-        # 5. Extraer audio de cada segmento
-        self._log(f"\n🎵 Extrayendo audio de segmentos...")
+        # 5. Extraer trozos de video de cada segmento
+        self._log(f"\n🎥 Extrayendo cortes de video (MP4)...")
         
         for i, segment in enumerate(segments, 1):
             self._log(f"   [{i}/{len(segments)}] Segmento {segment.segment_id}: {segment.get_time_range_str()}")
-            self.extract_audio_segment(video_path, segment, audio_dir)
-        
-        # 6. Transcribir cada segmento
-        self._log(f"\n📝 Transcribiendo segmentos con Whisper...")
-        
-        for i, segment in enumerate(segments, 1):
-            self._log(f"   [{i}/{len(segments)}] Transcribiendo segmento {segment.segment_id}...")
-            transcription = self.transcribe_segment(segment, language)
+            self.extract_video_segment(video_path, segment, video_chunks_dir)
             
-            if transcription:
-                self._log(f"      ✅ {segment.char_count} caracteres")
-                # Guardar transcripción en archivo .txt
-                self.save_transcription_to_file(segment, transcriptions_dir)
+            # Log de tamaño según los requisitos en la interfaz
+            if segment.audio_path and os.path.exists(segment.audio_path):
+                size_mb = os.path.getsize(segment.audio_path) / (1024 * 1024)
+                self._log(f"      📦 Tamaño: {size_mb:.2f} MB - Duración: {segment.duration}s")
+        
+        # 6. Fase 1: Subir todos los segmentos
+        self._log(f"\n⬆️ [Fase 1] Subiendo {len(segments)} recortes de video a Gemini...")
+        client = self._get_gemini_client()
+        uploaded_files = {}
+        for i, segment in enumerate(segments, 1):
+            if segment.audio_path and os.path.exists(segment.audio_path):
+                self._log(f"   [{i}/{len(segments)}] Subiendo segmento {segment.segment_id}...")
+                try:
+                    myfile = self._upload_file_with_retry(client, segment.audio_path)
+                    uploaded_files[segment.segment_id] = myfile
+                except Exception as e:
+                    self._log(f"   ❌ Error subiendo segmento {segment.segment_id}: {e}")
+        
+        # Fase 2: Esperar procesamiento de todos los archivos en los servidores de Google
+        self._log(f"\n⏳ [Fase 2] Esperando que Google procese los videos (Estado ACTIVE)...")
+        for seg_id, myfile in uploaded_files.items():
+            while myfile.state.name == "PROCESSING":
+                time.sleep(3)
+                myfile = client.files.get(name=myfile.name)
+                uploaded_files[seg_id] = myfile
+            
+            if myfile.state.name == "FAILED":
+                self._log(f"   ❌ Falla en servidor de Gemini para segmento {seg_id}.")
             else:
-                self._log(f"      ⚠️ Sin transcripción")
+                self._log(f"   ✅ Segmento {seg_id} procesado y listo.")
+                
+        # Fase 3: Transcribir cada segmento secuencialmente (evita colisiones de rate limit)
+        self._log(f"\n📝 [Fase 3] Transcribiendo {len(segments)} segmentos con Gemini Multimodal (secuencial)...")
+        
+        for i, seg in enumerate(segments, 1):
+            myfile = uploaded_files.get(seg.segment_id)
+            if not myfile or myfile.state.name == "FAILED":
+                self._log(f"   ⚠️ Saltando segmento {seg.segment_id} (No subido o Fallido)")
+                continue
+                
+            self._log(f"\n   [{i}/{len(segments)}] Transcribiendo segmento {seg.segment_id}...")
+            trans_text = self.transcribe_video_segment(
+                segment=seg, 
+                language=language, 
+                pre_uploaded_file=myfile, 
+                skip_cleanup=True
+            )
+            if trans_text:
+                self.save_transcription_to_file(seg, transcriptions_dir)
+                # Notificar al caller para guardado incremental
+                if on_segment_complete:
+                    try:
+                        on_segment_complete(seg)
+                    except Exception as cb_err:
+                        self._log(f"   ⚠️ Error en callback de guardado incremental: {cb_err}")
+                self._log(f"      ✅ Segmento {seg.segment_id} transcrito: {seg.char_count} caracteres")
+            else:
+                self._log(f"      ⚠️ Segmento {seg.segment_id} sin transcripción")
+            
+            # Cooldown entre segmentos para respetar rate limits (15s)
+            if i < len(segments):
+                self._log(f"   ⏳ Cooldown de 15s antes del siguiente segmento...")
+                time.sleep(15)
+                
+        # Fase 4: Limpieza de la API
+        self._log(f"\n🧹 [Fase 4] Limpiando archivos temporales en los servidores de Google...")
+        for seg_id, myfile in uploaded_files.items():
+            try:
+                client.files.delete(name=myfile.name)
+            except Exception:
+                pass
         
         # 7. Guardar metadata de la sesión
         metadata = {
@@ -671,6 +841,9 @@ class VideoProcessor:
             "video_path": video_path,
             "duration": video_duration,
             "language": language,
+            "great_grandparent": great_grandparent,
+            "grandparent": grandparent,
+            "father_prefix": father_prefix,
             "segment_duration": segment_duration,
             "overlap": overlap,
             "total_segments": len(segments),
@@ -696,7 +869,7 @@ class VideoProcessor:
         
         self._log("\n✅ Procesamiento completado")
         self._log(f"   📁 Sesión guardada en: {session_dir}")
-        self._log(f"   🎵 {len(segments)} archivos de audio")
+        self._log(f"   🎵 {len(segments)} archivos de video (MP4)")
         self._log(f"   📝 {len(segments)} transcripciones")
         total_chars = sum(s.char_count for s in segments)
         self._log(f"   📊 Total de caracteres: {total_chars:,}")
@@ -706,9 +879,10 @@ class VideoProcessor:
             "success": True,
             "session_id": session_id,
             "session_dir": session_dir,
-            "audio_dir": audio_dir,
+            "video_chunks_dir": video_chunks_dir,
             "transcriptions_dir": transcriptions_dir,
             "segments": segments,
+
             "metadata": metadata,
             "total_chars": total_chars
         }
