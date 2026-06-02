@@ -155,6 +155,15 @@ class FlashcardsConverter:
             flashcards = FlashcardsConverter.parse_basic(text)
         elif card_type == "level_4_analysis":
             flashcards = FlashcardsConverter.parse_multiple_choice(text)
+        # Extracción Atómica
+        elif card_type == "atomic_extraction":
+            flashcards = FlashcardsConverter.parse_basic(text)
+        # Alto Rendimiento
+        elif card_type == "high_performance_architect":
+            flashcards = FlashcardsConverter.parse_basic(text)
+        # Tipos de Examen
+        elif card_type in ["exam_pareto", "exam_faithful"]:
+            flashcards = FlashcardsConverter.parse_basic(text)
         else:
             flashcards = []
         

@@ -22,6 +22,12 @@ Sistema automatizado de generación de flashcards usando Gemini AI con importaci
 
 ---
 
+## 🚀 Novedades Recientes (Fase 5 y 6)
+
+- **Filtro Pedagógico QYI (Watchdog & EduKG):** Las flashcards ahora son evaluadas por un agente "Watchdog" que mide la calidad fáctica ($\Phi_Q$), la densidad de información ($\Phi_Y$) y la cobertura topológica en un Grafo de Conocimiento EduKG ($\Phi_C$). Solo las tarjetas con un puntaje global $QYI \geq 0.80$ son aprobadas.
+- **Sala de Espera y Deduplicación Semántica:** Las flashcards generadas entran a una sala de espera donde se comparan vectorialmente (usando embeddings) para detectar duplicados semánticos antes de enviarse a Anki.
+- **Preparación para SaaS:** Inicio de la fase 6 con arquitectura lista para FastAPI, Angular 19, PostgreSQL con Row-Level Security (RLS) y contenedores Docker (`docker-compose.yml` añadido).
+
 ## 📖 Descripción General
 
 Este proyecto es una herramienta completa para la generación automatizada de flashcards educativas a partir de:

@@ -15,7 +15,7 @@ import json
 from typing import List, Dict, Any, Tuple
 from pathlib import Path
 import re
-
+from typing import Optional
 # Try to import AnkiConnect
 try:
     import requests
@@ -36,8 +36,9 @@ class AnkiSyncManager:
     CARD_TYPE_CLOZE = "cloze"
     CARD_TYPE_VOCABULARY = "vocabulary"
     
-    def __init__(self):
+    def __init__(self, connect_url: Optional[str] = None):
         """Inicializa el gestor de sincronización."""
+        self.ANKI_CONNECT_URL = connect_url or os.getenv("ANKI_CONNECT_URL", "http://localhost:8765")
         self.anki_running = False
         self.anki_process = None
         self.last_error = None

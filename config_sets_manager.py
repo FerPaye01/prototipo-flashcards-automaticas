@@ -13,6 +13,25 @@ MASTER_FOLDER = "Flashcards Programa"
 
 CONFIG_SETS_FILE = os.path.join(MASTER_FOLDER, "flashcard_config_sets.json")
 
+# Instrucción adicional que se inyecta al prompt cuando el usuario activa "Usar Fuente Completa"
+SOURCE_CONTEXT_INSTRUCTION = """
+
+--- FUENTE DE CONSULTA COMPLETA (SOLO REFERENCIA) ---
+A continuación se adjunta la transcripción/extracción completa del material original.
+Usa esta fuente ÚNICAMENTE como referencia para:
+- Resolver abreviaciones, acrónimos o siglas que aparezcan en el segmento actual.
+- Entender sinónimos, analogías o simplificaciones que se refieran al mismo concepto.
+- Comprender el contexto general del tema para generar flashcards más precisas y coherentes.
+- Identificar la terminología correcta cuando el segmento use variaciones o referencias indirectas.
+
+REGLA ESTRICTA: NO generes flashcards de contenido que NO esté presente en el segmento actual (Input_Texto_OCR).
+La fuente es solo contexto de consulta, el segmento actual es tu único material de trabajo.
+
+Fuente_Original:
+{fuente_original}
+--- FIN DE FUENTE DE CONSULTA ---
+"""
+
 DEFAULT_PROMPTS = {
 
     "basic": """Rol: Asesor experto en pedagogía cognitiva y diseño instruccional para niños.
@@ -267,6 +286,226 @@ R: [Letra Correcta] - [Justificación breve: Por qué es la correcta y por qué 
 (Deja una línea en blanco entre cada par P/R)"""
 }
 
+DEFAULT_PROMPTS3 = {
+
+    "atomic_extraction": """Rol: Ingeniero de Conocimiento Atómico para Sistemas de Repetición Espaciada (SRS).
+
+Objetivo: Analizar el [Input_Texto_OCR] y extraer la información técnica, procedimental y factual. Debes destilar esta información en flashcards ATÓMICAS (formato Pregunta/Respuesta), eliminando toda la paja gramatical y prohibiendo estrictamente el uso de las oraciones originales del texto.
+
+Entradas:
+Input_Texto_OCR: {texto_ocr}
+
+Reglas de Síntesis Estricta (MANDATORIAS):
+
+    Principio de Mínima Información: Cada tarjeta debe evaluar UN SOLO vector de conocimiento. Si un concepto tiene 3 pasos, genera 3 tarjetas.
+
+    Cero Contexto Original (Anti-Patrones): Destruye la redacción literaria del autor original. Usa lenguaje telegráfico, viñetas cortas, dos puntos (:) y flechas (->). Tu objetivo es aislar la variable técnica.
+
+    Cero Opción Múltiple o Escenarios Largos: Todo debe ser Recuperación Activa pura y directa.
+
+Tipos de Tarjetas a Generar (Aplica según el contenido detectado):
+
+A. Tarjeta de Dato/Término (La Esencia del Nivel 1):
+Objetivo: Aislar variables técnicas puras sin el contexto del párrafo.
+
+    P: [Categoría general o Sistema]: [Función específica o Atributo clave].
+
+    R: [Término exacto, código, métrica o constante].
+    (Ejemplo P: "Biología celular: Organelo responsable de síntesis de ATP." R: "Mitocondria")
+
+B. Tarjeta de Diferencia/Contraste (La Esencia del Nivel 2):
+Objetivo: Evitar la confusión entre conceptos similares midiendo solo una variable.
+
+    P: [Concepto A] vs [Concepto B] respecto a -> [Variable específica].
+
+    R: [Concepto A = Estado 1] | [Concepto B = Estado 2].
+    (Ejemplo P: "TCP vs UDP respecto a -> Retransmisión de paquetes perdidos." R: "TCP = Sí | UDP = No")
+
+C. Tarjeta de Ejecución/Procedimiento (La Esencia del Nivel 3):
+Objetivo: Obligar a invocar la herramienta o comando exacto para un problema.
+
+    P: [Entorno/Sistema/Lenguaje]: Objetivo a lograr -> Comando/Herramienta necesaria.
+
+    R: [Sintaxis exacta o Nombre de la herramienta].
+    (Ejemplo P: "Git: Comando para deshacer último commit conservando cambios en staging." R: "git reset --soft HEAD~1")
+
+Instrucción de Formato de Salida (Estricto):
+Tu respuesta final debe ser OBLIGATORIAMENTE una lista de texto plano. Separa los pares con una línea en blanco. Usa estrictamente el prefijo "P:" para la pregunta y "R:" para la respuesta."""
+
+}
+
+DEFAULT_PROMPTS4 = {
+    "high_performance_architect": """Rol: Arquitecto de Aprendizaje de Alto Rendimiento e Ingeniero de Confiabilidad.
+
+Objetivo: Analizar el [Input_Multimodal] (que puede provenir de OCR, transcripciones de video/audio, libros o código) y destilarlo en flashcards ATÓMICAS de alto impacto. Tu meta es transformar la teoría pasiva en ESCENARIOS DE RESOLUCIÓN DE PROBLEMAS, aplicando la Taxonomía de Bloom (Niveles 2 y 3).
+
+Entradas:
+Input_Multimodal: {texto_ocr}
+
+Reglas de Síntesis Estricta (MANDATORIAS):
+1. Limpieza de Ruido: Ignora saludos, muletillas, anécdotas del presentador o relleno literario. Extrae solo los vectores de conocimiento técnico, lógico o procedimental.
+2. La Regla del "Caballo de Troya" (Cero Diccionarios): ESTRICTAMENTE PROHIBIDO generar tarjetas de Nivel 1 preguntando "¿Qué es [Concepto]?" o "¿Defina [Término]?". El concepto teórico debe ser la RESPUESTA a un problema o restricción planteada en la pregunta.
+3. Principio Atómico: Un solo problema/decisión por tarjeta. Si un escenario requiere evaluar 3 variables distintas, genera 3 tarjetas separadas.
+4. Lenguaje Telegráfico: Usa viñetas, flechas (->) y elimina artículos innecesarios.
+
+Tipos de Tarjetas a Generar (Aplica según el contenido):
+
+A. Tarjeta de Resolución / Edge Case (El Estándar - Nivel 3):
+Objetivo: El anverso plantea un cuello de botella, un error, o una restricción (legal/técnica) basada en el texto. El reverso es el concepto o técnica que lo soluciona.
+P: [Escenario hostil, falla o restricción extraída del texto]. ¿Solución/Concepto a aplicar?
+R: [Término técnico, patrón o acción exacta].
+(Ejemplo P: "El área legal bloquea el despliegue porque el dataset expone direcciones de víctimas. ¿Técnica de mitigación requerida?" -> R: "Data Masking (Enmascaramiento)").
+
+B. Tarjeta de Contraste Operativo (Toma de Decisiones - Nivel 2):
+Objetivo: Evaluar cuándo usar la Herramienta/Concepto A frente a la B ante un problema específico.
+P: Objetivo: [Meta operativa]. Condición limitante: [Restricción del entorno]. ¿Elección arquitectónica: [A] o [B]?
+R: [Opción correcta] -> [Razón telegráfica de 3 palabras].
+(Ejemplo P: "Objetivo: Consultar base de datos. Condición: Se requiere respuesta automática y en tiempo real. ¿Interoperabilidad o Gestión Tradicional?" -> R: "Interoperabilidad -> Flujo sin fricción").
+
+C. Excepción de Constante Pura (Nivel 1 Restringido):
+Objetivo: ÚNICAMENTE para límites matemáticos absolutos, sintaxis inmutable, puertos de red o leyes físicas que no pueden abstraerse.
+P: [Sistema/Entorno]: [Variable o límite estricto a recordar].
+R: [Número, constante o código exacto].
+(Ejemplo P: "PostgreSQL: Puerto de conexión por defecto." -> R: "5432").
+
+Instrucción de Formato de Salida (Estricto):
+Devuelve OBLIGATORIAMENTE una lista en texto plano.
+Separa cada par con una línea en blanco.
+Usa estrictamente el prefijo "P:" para la pregunta y "R:" para la respuesta.
+NO agregues introducciones, confirmaciones ni conclusiones. Solo el output."""
+}
+
+
+DEFAULT_PROMPTS5 = {
+    "exam_pareto": """Rol: Diseñador Senior de Exámenes de Certificación Profesional (AWS, Azure, OCI, Oracle, PMP, etc.).
+
+═══════════════════════════════════════════════
+⛔ PROTOCOLO DE FIDELIDAD — PROHIBICIÓN ABSOLUTA
+═══════════════════════════════════════════════
+Antes de generar cualquier flashcard, evalúa si el material contiene suficiente contenido educativo real.
+
+❌ PROHIBIDO: No extrapoles contenido NO explícitamente observable en el material dado.
+❌ PROHIBIDO: No completes huecos usando tu conocimiento general como LLM. Tu base de entrenamiento NO es una fuente válida.
+❌ PROHIBIDO: No inventes ni inferras conceptos por asociación temática (ver "OSINERGMIN" no te autoriza a inventar flashcards sobre regulación energética).
+❌ PROHIBIDO: Fechas aisladas, años de fundación, lugares geográficos sin contexto de aplicación práctica.
+❌ PROHIBIDO: Preguntas tipo "¿En qué año se fundó X?" o "¿Dónde se creó Y?" — no sirven en exámenes de certificación.
+❌ PROHIBIDO: Rellenar silencios, diapositivas de título, introducciones o despedidas con flashcards.
+❌ PROHIBIDO: Generar flashcards si el contenido docente real es insuficiente.
+
+✅ SI el material tiene menos de 3 conceptos aplicables y verificables → devuelve ÚNICAMENTE el texto: #SIN_CONTENIDO_SUFICIENTE
+✅ Solo usa información explícita y verificable dentro del material proporcionado.
+✅ Prefiere omitir antes que inferir.
+
+══════════════════════════════════
+📊 PRINCIPIO PARETO — PRIORIZACIÓN
+══════════════════════════════════
+No generes flashcards de todos los conceptos por igual.
+Aplica razonamiento estadístico: identifica los conceptos que estadísticamente aparecen con más frecuencia en exámenes de certificación del tipo que corresponde al material.
+Un buen principio desbloquea múltiples hechos. Un dato aislado solo memoriza uno.
+Prioriza: mecanismos, componentes funcionales, casos de uso, criterios de elección, garantías del sistema.
+Evita: trivia, datos administrativos, contexto histórico sin aplicación.
+
+══════════════════════════════
+🎯 DISTRIBUCIÓN ADAPTATIVA
+══════════════════════════════
+Adapta la distribución según lo que el material realmente contiene:
+- Si el material es de herramientas/soluciones → más preguntas de escenario/decisión.
+- Si el material es conceptual/teórico → más preguntas de principios y comprensión.
+- Si el material es mixto → balancea según la proporción real del contenido.
+No impongas una distribución fija si el material no lo permite.
+
+══════════════════════════════════════
+📐 FORMATO DE FLASHCARDS (Q&A Clásico)
+══════════════════════════════════════
+Tipo predominante: Pregunta de escenario o decisión → Respuesta que explica el principio y su aplicación.
+Longitud de respuesta: Suficiente para entender el concepto (puede ser 1 oración directa o 2-3 si el principio lo requiere). NO sobre-expliques.
+No uses Cloze. Solo Q&A clásico.
+Fórmulas y Variables: Toda fórmula matemática, código en línea o variable aislada debe estar encerrada usando formato MathJax de Anki, empezando exactamente con \\( y terminando con \\). Ejemplo: \\( x^2 = 4 \\).
+
+Ejemplos del estilo deseado:
+P: En OCI, ¿qué permite a los clientes el modelo de precios de Créditos Universales?
+R: Utilizar créditos prepagados para cualquier servicio en la nube elegible, otorgando flexibilidad total sin comprometerse a un servicio específico.
+
+P: ¿Qué componente de red de la VCN de OCI proporciona a las instancias en subred privada acceso a Internet de salida sin exponer una IP pública?
+R: Network Address Translation (NAT) Gateway. Permite el tráfico saliente desde instancias privadas sin permitir conexiones entrantes iniciadas desde Internet.
+
+P: ¿Cuál es la diferencia funcional entre un NSG y una Security List en OCI Networking?
+R: Los NSGs controlan el tráfico entre recursos específicos dentro de una VCN, mientras que las Security Lists aplican reglas a todas las instancias de una subred completa.
+
+══════════════════════════
+MATERIAL DE TRABAJO:
+{texto_ocr}
+══════════════════════════
+
+INSTRUCCIÓN DE FORMATO DE SALIDA (Estricto):
+Si hay contenido suficiente: devuelve SOLO pares P/R separados por una línea en blanco.
+Si NO hay contenido suficiente: devuelve SOLO el texto: #SIN_CONTENIDO_SUFICIENTE
+NO agregues introducciones, confirmaciones, resúmenes ni conclusiones."""
+}
+
+
+DEFAULT_PROMPTS6 = {
+    "exam_faithful": """Rol: Extractor de Ideas Principales para Estudio de Certificación Profesional.
+
+═══════════════════════════════════════════════
+⛔ PROTOCOLO DE FIDELIDAD — PROHIBICIÓN ABSOLUTA
+═══════════════════════════════════════════════
+Antes de generar cualquier flashcard, evalúa si el material contiene suficiente contenido educativo real.
+
+❌ PROHIBIDO: No extrapoles contenido NO explícitamente observable en el material dado.
+❌ PROHIBIDO: No completes huecos usando tu conocimiento general como LLM. Tu base de entrenamiento NO es una fuente válida.
+❌ PROHIBIDO: No inventes ni inferras conceptos por asociación temática.
+❌ PROHIBIDO: Fechas aisladas, años de fundación, lugares geográficos sin contexto de aplicación práctica.
+❌ PROHIBIDO: Preguntas tipo "¿En qué año se fundó X?" o "¿Dónde se creó Y?".
+❌ PROHIBIDO: Rellenar silencios, diapositivas de título, introducciones o despedidas con flashcards.
+❌ PROHIBIDO: Generar flashcards si el contenido docente real es insuficiente.
+
+✅ SI el material tiene menos de 3 conceptos aplicables y verificables → devuelve ÚNICAMENTE el texto: #SIN_CONTENIDO_SUFICIENTE
+✅ Solo usa información explícita y verificable dentro del material proporcionado.
+✅ Prefiere omitir antes que inferir.
+
+══════════════════════════════════════════════
+🎯 OBJETIVO: EXTRACCIÓN COMPLETA Y FIEL
+══════════════════════════════════════════════
+Extrae TODAS las ideas principales y secundarias con valor de estudio real que estén presentes en el material.
+No apliques priorización estadística (Pareto): si el material lo menciona y es relevante para un examen, inclúyelo.
+Un concepto tiene valor si:
+  - Explica un mecanismo, componente o proceso.
+  - Establece una relación causal o comparativa.
+  - Define un criterio de selección, limitación o garantía.
+  - Permite al estudiante resolver un problema o tomar una decisión.
+No tiene valor si es: dato administrativo, fecha sin contexto, nombre de ciudad, anécdota, saludo.
+
+══════════════════════════════════════════════
+📐 FORMATO DE FLASHCARDS (Q&A Clásico)
+══════════════════════════════════════════════
+Usa preguntas directas y respuestas completas que obliguen a recrear el concepto.
+Longitud de respuesta: la necesaria para entender la idea (no sobre-expliques, no sub-expliques).
+No uses Cloze. Solo Q&A clásico.
+Fórmulas y Variables: Toda fórmula matemática, código en línea o variable aislada debe estar encerrada usando formato MathJax de Anki, empezando exactamente con \\( y terminando con \\). Ejemplo: \\( x^2 = 4 \\).
+
+Ejemplos del estilo deseado:
+P: ¿Cuál es el propósito principal de un Grupo de Seguridad de Red (NSG) en OCI?
+R: Controlar el flujo de tráfico entre recursos específicos dentro de una VCN, aplicando reglas de seguridad a nivel de recurso individual en lugar de subred completa.
+
+P: En el análisis conceptual de un juego, ¿qué cuatro preguntas clave debe responder el diseñador para definir la experiencia del jugador?
+R: ¿Quién es el personaje?, ¿Qué acciones realiza?, ¿Qué metas u objetivos logra?, y ¿Qué emociones o sentimientos experimenta el jugador?
+
+P: ¿Por qué el Network Load Balancer es preferible al Standard Load Balancer para tráfico TCP de baja latencia?
+R: Porque opera en la Capa 4 del modelo OSI, lo que le permite procesar tráfico TCP y UDP con menor overhead que el Standard Load Balancer que opera en Capa 7 (HTTP/HTTPS).
+
+══════════════════════════
+MATERIAL DE TRABAJO:
+{texto_ocr}
+══════════════════════════
+
+INSTRUCCIÓN DE FORMATO DE SALIDA (Estricto):
+Si hay contenido suficiente: devuelve SOLO pares P/R separados por una línea en blanco.
+Si NO hay contenido suficiente: devuelve SOLO el texto: #SIN_CONTENIDO_SUFICIENTE
+NO agregues introducciones, confirmaciones, resúmenes ni conclusiones."""
+}
+
+
 # Set de configuración por defecto
 DEFAULT_CONFIG_SET = {
     "name": "Por Defecto",
@@ -299,6 +538,66 @@ DEFAULT_CONFIG_SET_LEVELS = {
         "level_4_analysis": True
     },
     "prompts": DEFAULT_PROMPTS2.copy(),
+    "created_at": "",
+    "updated_at": ""
+}
+
+# Set de configuración de Extracción Atómica
+DEFAULT_CONFIG_SET_ATOMIC = {
+    "name": "Extracción Atómica",
+    "description": "Flashcards atómicas P/R: Dato/Término, Diferencia/Contraste, Ejecución/Procedimiento",
+    "model": "gemini-3-flash-preview",
+    "wait_time": 60,
+    "replace_mode": False,
+    "active_types": {
+        "atomic_extraction": True
+    },
+    "prompts": DEFAULT_PROMPTS3.copy(),
+    "created_at": "",
+    "updated_at": ""
+}
+
+# Set de configuración de Alto Rendimiento
+DEFAULT_CONFIG_SET_HIGH_PERFORMANCE = {
+    "name": "Alto Rendimiento",
+    "description": "Transforma teoría en escenarios de resolución de problemas (Taxonomía de Bloom Nivel 2 y 3).",
+    "model": "gemini-3-flash-preview",
+    "wait_time": 60,
+    "replace_mode": False,
+    "active_types": {
+        "high_performance_architect": True
+    },
+    "prompts": DEFAULT_PROMPTS4.copy(),
+    "created_at": "",
+    "updated_at": ""
+}
+
+# Set de configuración de Examen Pareto
+DEFAULT_CONFIG_SET_EXAM_PARETO = {
+    "name": "Examen Pareto",
+    "description": "Flashcards estilo certificación. Solo contenido explícito del material. Priorización estadística tipo Pareto. Sin inferencias ni relleno.",
+    "model": "gemini-3-flash-preview",
+    "wait_time": 60,
+    "replace_mode": False,
+    "active_types": {
+        "exam_pareto": True
+    },
+    "prompts": DEFAULT_PROMPTS5.copy(),
+    "created_at": "",
+    "updated_at": ""
+}
+
+# Set de configuración de Examen Fiel
+DEFAULT_CONFIG_SET_EXAM_FAITHFUL = {
+    "name": "Examen Fiel",
+    "description": "Extracción completa de ideas principales para examen. Fidelidad absoluta al material. Sin Pareto. Sin inferencias ni relleno con conocimiento del LLM.",
+    "model": "gemini-3-flash-preview",
+    "wait_time": 60,
+    "replace_mode": False,
+    "active_types": {
+        "exam_faithful": True
+    },
+    "prompts": DEFAULT_PROMPTS6.copy(),
     "created_at": "",
     "updated_at": ""
 }
@@ -340,6 +639,42 @@ class ConfigSetsManager:
             levels["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             levels["updated_at"] = levels["created_at"]
             self.config_sets["Niveles Bloom"] = levels
+        
+        # Asegurar que existe el set de Extracción Atómica
+        if "Extracción Atómica" not in self.config_sets:
+            atomic = DEFAULT_CONFIG_SET_ATOMIC.copy()
+            atomic["prompts"] = DEFAULT_PROMPTS3.copy()
+            atomic["active_types"] = DEFAULT_CONFIG_SET_ATOMIC["active_types"].copy()
+            atomic["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            atomic["updated_at"] = atomic["created_at"]
+            self.config_sets["Extracción Atómica"] = atomic
+            
+        # Asegurar que existe el set de Alto Rendimiento
+        if "Alto Rendimiento" not in self.config_sets:
+            high_perf = DEFAULT_CONFIG_SET_HIGH_PERFORMANCE.copy()
+            high_perf["prompts"] = DEFAULT_PROMPTS4.copy()
+            high_perf["active_types"] = DEFAULT_CONFIG_SET_HIGH_PERFORMANCE["active_types"].copy()
+            high_perf["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            high_perf["updated_at"] = high_perf["created_at"]
+            self.config_sets["Alto Rendimiento"] = high_perf
+        
+        # Asegurar que existe el set de Examen Pareto
+        if "Examen Pareto" not in self.config_sets:
+            exam_pareto = DEFAULT_CONFIG_SET_EXAM_PARETO.copy()
+            exam_pareto["prompts"] = DEFAULT_PROMPTS5.copy()
+            exam_pareto["active_types"] = DEFAULT_CONFIG_SET_EXAM_PARETO["active_types"].copy()
+            exam_pareto["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            exam_pareto["updated_at"] = exam_pareto["created_at"]
+            self.config_sets["Examen Pareto"] = exam_pareto
+        
+        # Asegurar que existe el set de Examen Fiel
+        if "Examen Fiel" not in self.config_sets:
+            exam_faithful = DEFAULT_CONFIG_SET_EXAM_FAITHFUL.copy()
+            exam_faithful["prompts"] = DEFAULT_PROMPTS6.copy()
+            exam_faithful["active_types"] = DEFAULT_CONFIG_SET_EXAM_FAITHFUL["active_types"].copy()
+            exam_faithful["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            exam_faithful["updated_at"] = exam_faithful["created_at"]
+            self.config_sets["Examen Fiel"] = exam_faithful
         
         self._save_config_sets()
     
@@ -515,11 +850,19 @@ class ConfigSetsManager:
     
     def get_default_prompt(self, card_type: str) -> str:
         """Retorna el prompt por defecto para un tipo de tarjeta."""
-        # Buscar primero en DEFAULT_PROMPTS, luego en DEFAULT_PROMPTS2
+        # Buscar en todos los diccionarios por defecto
         if card_type in DEFAULT_PROMPTS:
             return DEFAULT_PROMPTS[card_type]
         elif card_type in DEFAULT_PROMPTS2:
             return DEFAULT_PROMPTS2[card_type]
+        elif card_type in DEFAULT_PROMPTS3:
+            return DEFAULT_PROMPTS3[card_type]
+        elif card_type in DEFAULT_PROMPTS4:
+            return DEFAULT_PROMPTS4[card_type]
+        elif card_type in DEFAULT_PROMPTS5:
+            return DEFAULT_PROMPTS5[card_type]
+        elif card_type in DEFAULT_PROMPTS6:
+            return DEFAULT_PROMPTS6[card_type]
         return ""
     
     def reset_prompt_to_default(self, set_name: str, card_type: str) -> bool:
@@ -527,14 +870,11 @@ class ConfigSetsManager:
         if set_name not in self.config_sets:
             return False
         
-        if card_type in DEFAULT_PROMPTS:
-            self.config_sets[set_name]["prompts"][card_type] = DEFAULT_PROMPTS[card_type]
-            self.config_sets[set_name]["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            self._save_config_sets()
-            return True
-        elif card_type in DEFAULT_PROMPTS2:
-            self.config_sets[set_name]["prompts"][card_type] = DEFAULT_PROMPTS2[card_type]
-            self.config_sets[set_name]["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            self._save_config_sets()
-            return True
+        for prompt_dict in [DEFAULT_PROMPTS, DEFAULT_PROMPTS2, DEFAULT_PROMPTS3, 
+                            DEFAULT_PROMPTS4, DEFAULT_PROMPTS5, DEFAULT_PROMPTS6]:
+            if card_type in prompt_dict:
+                self.config_sets[set_name]["prompts"][card_type] = prompt_dict[card_type]
+                self.config_sets[set_name]["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                self._save_config_sets()
+                return True
         return False

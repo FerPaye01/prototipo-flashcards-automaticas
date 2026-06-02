@@ -47,3 +47,8 @@ temp_videos/
 test_videos/
 whisper_models/
 flashcard_text_sessions.json
+/Flashcards Programa/
+
+temp_books/
+.env
+.env.example

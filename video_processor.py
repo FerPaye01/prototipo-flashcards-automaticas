@@ -35,12 +35,8 @@ try:
 except ImportError:
     IMAGEIO_AVAILABLE = False
 
-# playsound para reproducción
-try:
-    from playsound import playsound
-    PLAYSOUND_AVAILABLE = True
-except ImportError:
-    PLAYSOUND_AVAILABLE = False
+# Reproducción multimedia se maneja ahora mediante ffplay o el reproductor del sistema
+
 
 
 class VideoSegment:
@@ -113,7 +109,8 @@ class VideoProcessor:
     # Límites (temporalmente aumentados o eliminados)
     MAX_DURATION = 36000  # 10 horas en segundos (aumentado)
     MAX_SIZE = 10 * 1024 * 1024 * 1024  # 10GB (aumentado)
-    SUPPORTED_FORMATS = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.mov')
+    SUPPORTED_FORMATS = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.mov', 
+                         '.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus')
     
     # Directorio temporal
     TEMP_DIR = os.path.join("Flashcards Programa", "temp_videos")
@@ -156,6 +153,8 @@ class VideoProcessor:
         if ext not in self.SUPPORTED_FORMATS:
             return False, f"Formato no soportado. Use: {', '.join(self.SUPPORTED_FORMATS)}"
         
+        media_label = "Audio" if ext in ('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus') else "Video"
+        
         # Verificar tamaño
         size = os.path.getsize(video_path)
         size_mb = size / (1024 * 1024)
@@ -166,16 +165,15 @@ class VideoProcessor:
         duration = self._get_video_duration(video_path)
         
         if duration is None:
-            # Si no podemos obtener la duración, asumir que es válido
-            self._log("⚠️ No se pudo obtener duración del video, procesando de todos modos")
-            return True, f"Video válido (tamaño: {size_mb:.1f} MB)"
+            self._log(f"⚠️ No se pudo obtener duración, procesando de todos modos")
+            return True, f"{media_label} válido (tamaño: {size_mb:.1f} MB)"
         
         duration_min = duration / 60
         
         if duration > self.MAX_DURATION:
-            return False, f"Video muy largo ({duration_min:.1f} min). Máximo: {self.MAX_DURATION / 3600:.0f} horas"
+            return False, f"{media_label} muy largo ({duration_min:.1f} min). Máximo: {self.MAX_DURATION / 3600:.0f} horas"
         
-        return True, f"Video válido ({duration_min:.1f} min, {size_mb:.1f} MB)"
+        return True, f"{media_label} válido ({duration_min:.1f} min, {size_mb:.1f} MB)"
     
     def _get_video_duration(self, video_path: str) -> Optional[float]:
         """
@@ -309,7 +307,8 @@ class VideoProcessor:
                 try:
                     response = client.models.generate_content(
                         model=model_name,
-                        contents=[file_obj, prompt]
+                        contents=[file_obj, prompt],
+                        config=types.GenerateContentConfig(temperature=0.1)
                     )
                     return response.text
                 except Exception as e:
@@ -524,19 +523,21 @@ class VideoProcessor:
         output_dir: str
     ) -> str:
         """
-        Extrae un chunk de video (MP4) usando copia directa de streams.
-        
-        Args:
-            video_path: Ruta al video original
-            segment: VideoSegment a extraer
-            output_dir: Directorio de salida
-            
-        Returns:
-            Ruta al archivo de video MP4 extraído
+        Extrae un chunk de video (MP4) o audio (WAV) usando ffmpeg.
+        Para archivos de audio puro, extrae como WAV en lugar de MP4.
         """
+        # Detectar si es audio puro
+        source_ext = os.path.splitext(video_path)[1].lower()
+        is_audio_source = source_ext in ('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus')
+        
+        if is_audio_source:
+            output_ext = ".wav"
+        else:
+            output_ext = ".mp4"
+        
         output_path = os.path.join(
             output_dir,
-            f"segment_{segment.segment_id:03d}.mp4"
+            f"segment_{segment.segment_id:03d}{output_ext}"
         )
         
         try:
@@ -545,16 +546,31 @@ class VideoProcessor:
                         str(int((segment.start_time % 3600) // 60)).zfill(2) + ":" + \
                         str(int(segment.start_time % 60)).zfill(2)
             
-            # Construir y ejecutar el comando ffmpeg directamente con '-c copy'
-            cmd = [
-                'ffmpeg',
-                '-y',  # Sobrescribir
-                '-i', video_path,
-                '-ss', start_time,
-                '-t', str(segment.duration),
-                '-c', 'copy',
-                output_path
-            ]
+            if is_audio_source:
+                # Para audio: extraer como WAV (PCM) para máxima compatibilidad con Gemini
+                cmd = [
+                    'ffmpeg',
+                    '-y',
+                    '-i', video_path,
+                    '-ss', start_time,
+                    '-t', str(segment.duration),
+                    '-vn',  # Sin video
+                    '-acodec', 'pcm_s16le',  # PCM 16-bit
+                    '-ar', '16000',  # 16kHz (óptimo para speech)
+                    '-ac', '1',  # Mono
+                    output_path
+                ]
+            else:
+                # Para video: copia directa de streams
+                cmd = [
+                    'ffmpeg',
+                    '-y',
+                    '-i', video_path,
+                    '-ss', start_time,
+                    '-t', str(segment.duration),
+                    '-c', 'copy',
+                    output_path
+                ]
             
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
@@ -563,14 +579,14 @@ class VideoProcessor:
                 return None
             
             if os.path.exists(output_path):
-                segment.audio_path = output_path # Mantener la propiedad para compatibilidad
+                segment.audio_path = output_path
                 return output_path
             else:
-                self._log(f"❌ No se pudo extraer video del segmento {segment.segment_id}")
+                self._log(f"❌ No se pudo extraer {'audio' if is_audio_source else 'video'} del segmento {segment.segment_id}")
                 return None
         
         except Exception as e:
-            self._log(f"❌ Error extrayendo video del segmento {segment.segment_id}: {e}")
+            self._log(f"❌ Error extrayendo segmento {segment.segment_id}: {e}")
             return None
     
     def transcribe_video_segment(
@@ -613,21 +629,38 @@ class VideoProcessor:
                 if myfile.state.name == "FAILED":
                     self._log(f"   ❌ Falla en servidor de Gemini.")
                     return ""
-                
-            prompt = (
-                "Actúa como un excelente estudiante universitario especializado, elaborando "
-                "material de estudio integral basado en el contenido audiovisual proporcionado. "
-                "Recibes la imagen del video de manera sincronizada con la voz. "
-                "Tu instrucción ESTRICTA es integrar y consolidar paso a paso todo el conocimiento visual "
-                "(diapositivas, esquemas, ejemplos en pantalla) que aparezca a lo largo del tiempo, "
-                "en conjunto cronológico con las explicaciones verbales exactas del ponente. "
-                "Debes añadir observaciones y apuntes complementarios como estudiante resaltando "
-                "lo relevante del contenido, todo con la mejor ortografía y puntuación posibles en español. "
-                "ESTÁ ESTRICTAMENTE PROHIBIDO SIMPLIFICAR O RESUMIR; no debes perder información sin importar "
-                "qué tan largo sea. Debes recuperar hasta el último detalle técnico válido mostrado o dicho. "
-                "ADICIONALMENTE: Si detectas fragmentos de CÓDIGO o ESPECIFICACIONES TÉCNICAS, debes recrearlos "
-                "ÍNTEGRAMENTE sin modificar ni una sola línea de sintaxis. Si es una REUNIÓN, identifica participantes y acuerdos."
-            )
+            
+            # Determinar si es audio o video para el prompt
+            is_audio = segment.audio_path.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus'))
+            
+            if is_audio:
+                prompt = (
+                    "Actúa como un excelente estudiante universitario especializado, elaborando "
+                    "material de estudio integral basado en el contenido de AUDIO proporcionado. "
+                    "Tu instrucción ESTRICTA es integrar y consolidar paso a paso todo el conocimiento verbal, "
+                    "explicaciones exactas, ejemplos mencionados y matices del ponente. "
+                    "Debes añadir observaciones y apuntes complementarios como un estudiante brillante resaltando "
+                    "lo relevante del contenido, todo con la mejor ortografía y puntuación posibles en español. "
+                    "ESTÁ ESTRICTAMENTE PROHIBIDO SIMPLIFICAR O RESUMIR; no debes perder información sin importar "
+                    "qué tan largo sea. Debes recuperar hasta el último detalle técnico válido mencionado. "
+                    "ADICIONALMENTE: Si se dictan fragmentos de CÓDIGO o ESPECIFICACIONES TÉCNICAS, debes recrearlos "
+                    "ÍNTEGRAMENTE. Si es una REUNIÓN o ENTREVISTA, identifica claramente participantes, acuerdos y decisiones."
+                )
+            else:
+                prompt = (
+                    "Actúa como un excelente estudiante universitario especializado, elaborando "
+                    "material de estudio integral basado en el contenido audiovisual proporcionado. "
+                    "Recibes la imagen del video de manera sincronizada con la voz. "
+                    "Tu instrucción ESTRICTA es integrar y consolidar paso a paso todo el conocimiento visual "
+                    "(diapositivas, esquemas, ejemplos en pantalla) que aparezca a lo largo del tiempo, "
+                    "en conjunto cronológico con las explicaciones verbales exactas del ponente. "
+                    "Debes añadir observaciones y apuntes complementarios como estudiante resaltando "
+                    "lo relevante del contenido, todo con la mejor ortografía y puntuación posibles en español. "
+                    "ESTÁ ESTRICTAMENTE PROHIBIDO SIMPLIFICAR O RESUMIR; no debes perder información sin importar "
+                    "qué tan largo sea. Debes recuperar hasta el último detalle técnico válido mostrado o dicho. "
+                    "ADICIONALMENTE: Si detectas fragmentos de CÓDIGO o ESPECIFICACIONES TÉCNICAS, debes recrearlos "
+                    "ÍNTEGRAMENTE sin modificar ni una sola línea de sintaxis. Si es una REUNIÓN, identifica participantes y acuerdos."
+                )
             
             self._log(f"   🧠 Generando transcripción multimodal...")
             transcription_text = self._generate_with_fallback(myfile, prompt)
@@ -698,7 +731,9 @@ class VideoProcessor:
         on_segment_complete: Optional[Callable[["VideoSegment"], None]] = None,
         great_grandparent: str = "",
         grandparent: str = "",
-        father_prefix: str = ""
+        father_prefix: str = "",
+        extraction_mode: str = "Transcripción Estándar",
+        explicit_timestamps: Optional[List[Dict[str, float]]] = None
     ) -> Dict[str, Any]:
         """
         Procesa un video completo: valida, segmenta, extrae audio y transcribe.
@@ -714,8 +749,12 @@ class VideoProcessor:
         Returns:
             Dict con información del procesamiento
         """
+        is_audio_file = video_path.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus'))
+        media_label = "AUDIO" if is_audio_file else "VIDEO"
+        media_icon = "🎧" if is_audio_file else "🎬"
+        
         self._log("\n" + "="*60)
-        self._log("🎬 PROCESANDO VIDEO")
+        self._log(f"{media_icon} PROCESANDO {media_label}")
         self._log("="*60)
         
         # 1. Validar video
@@ -744,19 +783,32 @@ class VideoProcessor:
         os.makedirs(video_chunks_dir, exist_ok=True)
         os.makedirs(transcriptions_dir, exist_ok=True)
         
-        # 4. Determinar puntos de corte (segmentación fija por ahora)
-        self._log(f"\n✂️ Segmentando video...")
-        self._log(f"   Duración del segmento: {segment_duration}s")
-        self._log(f"   Overlap: {overlap}s")
+        # 4. Determinar puntos de corte
+        if explicit_timestamps:
+            self._log(f"\n✂️ Usando {len(explicit_timestamps)} cortes semánticos explícitos proporcionados por IA...")
+            segments = []
+            for i, ts in enumerate(explicit_timestamps):
+                segment = VideoSegment(
+                    start_time=ts["start"],
+                    end_time=ts["end"],
+                    segment_id=i + 1
+                )
+                segments.append(segment)
+        else:
+            self._log(f"\n✂️ Segmentando {media_label.lower()} de forma estándar...")
+            self._log(f"   Duración del segmento: {segment_duration}s")
+            self._log(f"   Overlap: {overlap}s")
+            
+            segments = self.segment_by_fixed_duration(
+                video_duration, segment_duration, overlap
+            )
         
-        segments = self.segment_by_fixed_duration(
-            video_duration, segment_duration, overlap
-        )
         
         self._log(f"   Total de segmentos: {len(segments)}")
         
-        # 5. Extraer trozos de video de cada segmento
-        self._log(f"\n🎥 Extrayendo cortes de video (MP4)...")
+        # 5. Extraer trozos
+        extract_fmt = "WAV" if is_audio_file else "MP4"
+        self._log(f"\n{media_icon} Extrayendo cortes de {media_label.lower()} ({extract_fmt})...")
         
         for i, segment in enumerate(segments, 1):
             self._log(f"   [{i}/{len(segments)}] Segmento {segment.segment_id}: {segment.get_time_range_str()}")
@@ -767,8 +819,58 @@ class VideoProcessor:
                 size_mb = os.path.getsize(segment.audio_path) / (1024 * 1024)
                 self._log(f"      📦 Tamaño: {size_mb:.2f} MB - Duración: {segment.duration}s")
         
+        # Si el modo es Generación Directa, terminamos aquí para evitar gastos y tiempos de API.
+        # Las flashcards se generarán en caliente después.
+        if extraction_mode == "Generación Directa (Multimodal)":
+            self._log(f"\n⚡ Modo Generación Directa detectado. Saltando fases de transcripción multimodal.")
+            self._log(f"   (Los fragmentos de {media_label.lower()} serán enviados directamente a Gemini al crear secciones).")
+            
+            # Guardar metadata de la sesión para poder recuperarla si la app se cierra
+            metadata = {
+                "session_id": session_id,
+                "original_video": os.path.basename(video_path),
+                "video_path": video_path,
+                "duration": video_duration,
+                "language": language,
+                "great_grandparent": great_grandparent,
+                "grandparent": grandparent,
+                "father_prefix": father_prefix,
+                "segment_duration": segment_duration,
+                "overlap": overlap,
+                "total_segments": len(segments),
+                "extraction_mode": extraction_mode,
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "segments": [
+                    {
+                        "id": s.segment_id,
+                        "start": s.start_time,
+                        "end": s.end_time,
+                        "duration": s.duration,
+                        "time_range": s.get_time_range_str(),
+                        "audio_file": os.path.basename(s.audio_path) if s.audio_path else None,
+                        "transcription_file": None,
+                        "char_count": 0
+                    }
+                    for s in segments
+                ]
+            }
+            metadata_path = os.path.join(session_dir, "metadata.json")
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+            self._log(f"   💾 Sesión temporal guardada en: {session_dir}")
+            
+            return {
+                "success": True,
+                "session_id": session_id,
+                "session_dir": session_dir,
+                "video_chunks_dir": video_chunks_dir,
+                "segments": segments,
+                "total_chars": 0
+            }
+
+
         # 6. Fase 1: Subir todos los segmentos
-        self._log(f"\n⬆️ [Fase 1] Subiendo {len(segments)} recortes de video a Gemini...")
+        self._log(f"\n⬆️ [Fase 1] Subiendo {len(segments)} recortes de {media_label.lower()} a Gemini...")
         client = self._get_gemini_client()
         uploaded_files = {}
         for i, segment in enumerate(segments, 1):
@@ -781,7 +883,7 @@ class VideoProcessor:
                     self._log(f"   ❌ Error subiendo segmento {segment.segment_id}: {e}")
         
         # Fase 2: Esperar procesamiento de todos los archivos en los servidores de Google
-        self._log(f"\n⏳ [Fase 2] Esperando que Google procese los videos (Estado ACTIVE)...")
+        self._log(f"\n⏳ [Fase 2] Esperando que Google procese los archivos (Estado ACTIVE)...")
         for seg_id, myfile in uploaded_files.items():
             while myfile.state.name == "PROCESSING":
                 time.sleep(3)
@@ -796,6 +898,7 @@ class VideoProcessor:
         # Fase 3: Transcribir cada segmento secuencialmente (evita colisiones de rate limit)
         self._log(f"\n📝 [Fase 3] Transcribiendo {len(segments)} segmentos con Gemini Multimodal (secuencial)...")
         
+        total_chars = 0
         for i, seg in enumerate(segments, 1):
             myfile = uploaded_files.get(seg.segment_id)
             if not myfile or myfile.state.name == "FAILED":
@@ -887,27 +990,48 @@ class VideoProcessor:
             "total_chars": total_chars
         }
     
-    def play_audio(self, audio_path: str):
+    def play_audio(self, media_path: str):
         """
-        Reproduce un archivo de audio.
+        Reproduce un archivo multimedia (audio o video) usando el reproductor del sistema o ffplay.
         
         Args:
-            audio_path: Ruta al archivo de audio
+            media_path: Ruta al archivo de audio o video
         """
-        if not PLAYSOUND_AVAILABLE:
-            self._log("⚠️ playsound no está instalado. Ejecuta: pip install playsound")
-            return
-        
-        if not os.path.exists(audio_path):
-            self._log(f"❌ Archivo de audio no encontrado: {audio_path}")
+        if not os.path.exists(media_path):
+            self._log(f"❌ Archivo no encontrado: {media_path}")
             return
         
         try:
-            self._log(f"▶️ Reproduciendo: {os.path.basename(audio_path)}")
-            playsound(audio_path)
-            self._log(f"⏹️ Reproducción finalizada")
+            self._log(f"▶️ Reproduciendo: {os.path.basename(media_path)}")
+            import sys
+            
+            is_audio = media_path.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus'))
+            
+            def _play_system_default(path):
+                if sys.platform.startswith('darwin'):
+                    subprocess.call(('open', path))
+                elif os.name == 'nt':
+                    os.startfile(path)
+                elif os.name == 'posix':
+                    subprocess.call(('xdg-open', path))
+            
+            if is_audio:
+                # Usar ffplay para audios sin mostrar pantalla y bloquear ejecución
+                cmd = ['ffplay', '-autoexit', '-nodisp', '-loglevel', 'quiet', media_path]
+                try:
+                    subprocess.run(cmd, check=True)
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    self._log(f"⚠️ ffplay falló. Intentando reproductor del sistema...")
+                    _play_system_default(media_path)
+            else:
+                # Para videos usar reproductor por defecto del sistema (VLC, Películas, etc.) para tener controles UI
+                self._log(f"🎬 Abriendo video en reproductor del sistema con controles completos...")
+                _play_system_default(media_path)
+                
+            self._log(f"⏹️ Acción de reproducción finalizada")
+                
         except Exception as e:
-            self._log(f"❌ Error reproduciendo audio: {e}")
+            self._log(f"❌ Error reproduciendo: {e}")
     
     def cleanup_session(self, session_dir: str):
         """Elimina los archivos temporales de una sesión."""
@@ -917,3 +1041,205 @@ class VideoProcessor:
                 self._log(f"🗑️ Sesión limpiada: {os.path.basename(session_dir)}")
         except Exception as e:
             self._log(f"⚠️ Error limpiando sesión: {e}")
+
+    # =========================================================================
+    # TRANSCRIPCIÓN FIEL PARA FUENTE DE CONSULTA
+    # =========================================================================
+
+    # Prompt de transcripción fiel para VIDEO (multimodal: audio + visual)
+    FAITHFUL_VIDEO_PROMPT = (
+        "Transcribe fielmente todo el contenido de este segmento de video. "
+        "Incluye:\n"
+        "- Todo lo que se dice verbalmente (transcripción literal del audio, sin resumir).\n"
+        "- Todo texto visible en pantalla (diapositivas, código fuente, títulos, subtítulos, anotaciones, URLs).\n"
+        "- Descripción breve de esquemas, diagramas o gráficos relevantes que aparezcan.\n"
+        "- Fórmulas matemáticas o ecuaciones visibles.\n\n"
+        "REGLAS ESTRICTAS:\n"
+        "- NO resumas ni simplifiques bajo ninguna circunstancia.\n"
+        "- NO añadas opiniones, observaciones ni interpretaciones.\n"
+        "- Mantén el orden cronológico del contenido.\n"
+        "- Usa formato Markdown limpio para estructurar.\n"
+        "- Si se dictan fragmentos de código, transcríbelos ÍNTEGRAMENTE.\n"
+        "- Escribe en español con la mejor ortografía posible."
+    )
+
+    # Prompt de transcripción fiel para AUDIO (solo contenido hablado)
+    FAITHFUL_AUDIO_PROMPT = (
+        "Transcribe fielmente todo el contenido hablado en este segmento de audio. "
+        "Incluye:\n"
+        "- Cada palabra dicha por el(los) ponente(s), sin resumir ni parafrasear.\n"
+        "- Si se mencionan términos técnicos, acrónimos o siglas, transcríbelos tal cual.\n"
+        "- Si se dictan fragmentos de código o especificaciones técnicas, transcríbelos ÍNTEGRAMENTE.\n\n"
+        "REGLAS ESTRICTAS:\n"
+        "- NO resumas ni simplifiques bajo ninguna circunstancia.\n"
+        "- NO añadas opiniones, observaciones ni interpretaciones.\n"
+        "- Mantén el orden cronológico del contenido.\n"
+        "- Escribe en español con la mejor ortografía posible."
+    )
+
+    def generate_faithful_source_transcription(
+        self,
+        media_path: str,
+        segment_duration_min: float = 5.0,
+        language: str = "es",
+        on_progress: Optional[Callable[[str], None]] = None,
+        session_dir: Optional[str] = None
+    ) -> str:
+        """
+        Genera una transcripción fiel y completa del video/audio completo,
+        incluyendo contenido visual (para video) y hablado.
+        
+        Esta transcripción se usa como "Fuente de Consulta" para contextualizar
+        la generación de flashcards en segmentos individuales.
+        
+        Args:
+            media_path: Ruta al archivo de video o audio.
+            segment_duration_min: Duración de cada segmento de transcripción en minutos.
+            language: Código de idioma.
+            on_progress: Callback para reportar progreso.
+            session_dir: Directorio de sesión para guardar archivos temporales.
+            
+        Returns:
+            Texto completo de la transcripción fiel concatenada.
+        """
+        log = on_progress or self._log
+        
+        is_audio_file = media_path.lower().endswith(
+            ('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus')
+        )
+        media_label = "AUDIO" if is_audio_file else "VIDEO"
+        
+        log(f"\n{'='*60}")
+        log(f"📋 GENERANDO FUENTE DE CONSULTA ({media_label})")
+        log(f"{'='*60}")
+        
+        # 1. Obtener duración total
+        duration = self._get_video_duration(media_path)
+        if duration is None or duration <= 0:
+            log("❌ No se pudo obtener la duración del archivo")
+            return ""
+        
+        segment_duration_sec = segment_duration_min * 60
+        log(f"   ⏱ Duración total: {duration/60:.1f} min")
+        log(f"   ✂️ Segmento de fuente: {segment_duration_min} min")
+        
+        # 2. Crear segmentos SIN overlap (para fuente, queremos cobertura completa sin duplicados)
+        source_segments = self.segment_by_fixed_duration(
+            video_duration=duration,
+            segment_duration=segment_duration_sec,
+            overlap=0  # Sin overlap para fuente
+        )
+        
+        log(f"   📊 Segmentos de fuente a transcribir: {len(source_segments)}")
+        
+        # 3. Crear directorio temporal para chunks de fuente
+        if not session_dir:
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            session_dir = os.path.join(self.TEMP_DIR, f"source_{session_id}")
+        
+        source_chunks_dir = os.path.join(session_dir, "source_chunks")
+        os.makedirs(source_chunks_dir, exist_ok=True)
+        
+        # 4. Extraer segmentos de media
+        log(f"\n✂️ Extrayendo {len(source_segments)} segmentos de {media_label.lower()}...")
+        for i, seg in enumerate(source_segments, 1):
+            log(f"   [{i}/{len(source_segments)}] {seg.get_time_range_str()}")
+            self.extract_video_segment(media_path, seg, source_chunks_dir)
+        
+        # 5. Subir todos los segmentos a Gemini
+        log(f"\n⬆️ Subiendo {len(source_segments)} segmentos a Gemini...")
+        client = self._get_gemini_client()
+        uploaded_files = {}
+        
+        for i, seg in enumerate(source_segments, 1):
+            if seg.audio_path and os.path.exists(seg.audio_path):
+                log(f"   [{i}/{len(source_segments)}] Subiendo segmento {seg.segment_id}...")
+                try:
+                    myfile = self._upload_file_with_retry(client, seg.audio_path)
+                    uploaded_files[seg.segment_id] = myfile
+                except Exception as e:
+                    log(f"   ❌ Error subiendo segmento {seg.segment_id}: {e}")
+        
+        # 6. Esperar procesamiento
+        log(f"\n⏳ Esperando procesamiento en Gemini...")
+        for seg_id, myfile in uploaded_files.items():
+            while myfile.state.name == "PROCESSING":
+                time.sleep(3)
+                myfile = client.files.get(name=myfile.name)
+                uploaded_files[seg_id] = myfile
+            
+            if myfile.state.name == "FAILED":
+                log(f"   ❌ Falla en servidor para segmento {seg_id}")
+            else:
+                log(f"   ✅ Segmento {seg_id} listo")
+        
+        # 7. Transcribir fielmente cada segmento
+        prompt = self.FAITHFUL_AUDIO_PROMPT if is_audio_file else self.FAITHFUL_VIDEO_PROMPT
+        
+        log(f"\n📝 Transcribiendo fielmente {len(source_segments)} segmentos...")
+        transcription_parts = []
+        
+        for i, seg in enumerate(source_segments, 1):
+            myfile = uploaded_files.get(seg.segment_id)
+            if not myfile or myfile.state.name == "FAILED":
+                log(f"   ⚠️ Saltando segmento {seg.segment_id} (no disponible)")
+                continue
+            
+            log(f"   [{i}/{len(source_segments)}] Transcribiendo segmento {seg.segment_id} ({seg.get_time_range_str()})...")
+            
+            try:
+                text = self._generate_with_fallback(myfile, prompt)
+                if text and text.strip():
+                    transcription_parts.append(
+                        f"--- Segmento {seg.segment_id} ({seg.get_time_range_str()}) ---\n{text.strip()}"
+                    )
+                    log(f"      ✅ {len(text)} caracteres transcritos")
+                else:
+                    log(f"      ⚠️ Transcripción vacía para segmento {seg.segment_id}")
+            except Exception as e:
+                log(f"      ❌ Error transcribiendo segmento {seg.segment_id}: {e}")
+            
+            # Cooldown entre segmentos
+            if i < len(source_segments):
+                log(f"   ⏳ Cooldown de 10s...")
+                time.sleep(10)
+        
+        # 8. Limpiar archivos de la API
+        log(f"\n🧹 Limpiando archivos temporales de Gemini...")
+        for seg_id, myfile in uploaded_files.items():
+            try:
+                client.files.delete(name=myfile.name)
+            except Exception:
+                pass
+        
+        # 9. Concatenar todo
+        full_transcription = "\n\n".join(transcription_parts)
+        
+        if not full_transcription.strip():
+            log("❌ No se pudo generar la transcripción de fuente")
+            return ""
+        
+        # 10. Guardar archivo de fuente
+        source_file_path = os.path.join(session_dir, "transcripcion_fuente_completa.md")
+        try:
+            with open(source_file_path, 'w', encoding='utf-8') as f:
+                f.write(f"# Transcripción Fiel Completa ({media_label})\n")
+                f.write(f"# Archivo: {os.path.basename(media_path)}\n")
+                f.write(f"# Duración: {duration/60:.1f} min\n")
+                f.write(f"# Segmentos: {len(transcription_parts)}\n\n")
+                f.write(full_transcription)
+            log(f"   💾 Fuente guardada: {source_file_path}")
+        except Exception as e:
+            log(f"   ⚠️ Error guardando fuente: {e}")
+        
+        # Limpiar chunks temporales de fuente (el archivo final ya está guardado)
+        try:
+            shutil.rmtree(source_chunks_dir, ignore_errors=True)
+        except Exception:
+            pass
+        
+        log(f"\n✅ FUENTE DE CONSULTA GENERADA: {len(full_transcription):,} caracteres")
+        log(f"{'='*60}\n")
+        
+        return full_transcription
+
