@@ -5,3 +5,5 @@ pdfminer.six==20250506
 requests==2.32.5
 colorama==0.4.6
 tqdm==4.67.1
+ffmpeg
+pandas

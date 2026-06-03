@@ -120,13 +120,37 @@ class VideoProcessor:
         self.log_callback = log_callback or print
         self._ensure_temp_dir()
         
-        # Cargar API Keys de Gemini
-        self.api_keys = []
-        keys_str = os.environ.get("GEMINI_API_KEYS_OCR", "")
-        if keys_str:
-            self.api_keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+        # Verificar disponibilidad de FFmpeg
+        self.ffmpeg_available = self._check_ffmpeg()
+        if not self.ffmpeg_available:
+            self._log("⚠️ ADVERTENCIA: FFmpeg no encontrado en el sistema. La extracción de video/audio fallará.")
+            self._log("   Instala FFmpeg y asegúrate de que esté en tu PATH.")
+
+        # Cargar pool de llaves (Misma lógica centralizada)
+        kstr = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEYS_OCR")
+        if kstr:
+            self.api_keys = [k.strip() for k in kstr.split(",") if k.strip()]
+        else:
+            # Fallback a llaves individuales para compatibilidad
+            self.api_keys = []
+            for i in range(1, 5):
+                k = os.environ.get(f"GEMINI_API_KEY_{i}") or os.environ.get(f"GEMINI_API_KEYS_{i}")
+                if k: self.api_keys.extend([x.strip() for x in k.split(",") if x.strip()])
             
+        # Cargar pool de modelos
+        mstr = os.environ.get("GEMINI_MODEL") or "gemini-1.5-flash"
+        self.models_pool = [m.strip() for m in mstr.split(",") if m.strip()]
+        
         self.current_key_index = 0
+        self.exhausted_keys = set()
+
+    def _check_ffmpeg(self) -> bool:
+        """Verifica si ffmpeg está instalado."""
+        try:
+            subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return True
+        except FileNotFoundError:
+            return False
     
     def _log(self, message: str):
         """Registra un mensaje."""
@@ -290,16 +314,14 @@ class VideoProcessor:
         return self.current_key_index != 0
 
     def _generate_with_fallback(self, file_obj, prompt: str) -> str:
-        """Genera contenido usando fallback de modelos con reintentos por rate limit.
+        """Genera contenido usando el pool de modelos con reintentos por rate limit.
         
         IMPORTANTE: Los archivos subidos a Gemini están vinculados a la API Key
         que los subió. NO se puede rotar a otra key para acceder al mismo archivo.
-        En su lugar, se espera y reintenta con la misma key.
         """
-        models = [os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview"), "gemini-2.5-flash"]
         max_retries = 3  # Reintentos por rate limit por modelo
         
-        for model_name in models:
+        for model_name in self.models_pool:
             self._log(f"   🤖 Intentando con modelo {model_name}...")
             
             for attempt in range(max_retries):
@@ -315,23 +337,22 @@ class VideoProcessor:
                     error_str = str(e).lower()
                     
                     if "429" in error_str or "quota" in error_str or "exhausted" in error_str:
-                        wait_time = 30 * (attempt + 1)  # 30s, 60s, 90s
-                        remaining = max_retries - attempt - 1
-                        if remaining > 0:
-                            self._log(f"   ⏳ Rate limit alcanzado. Esperando {wait_time}s antes de reintentar ({remaining} intentos restantes)...")
+                        wait_time = 30 * (attempt + 1)
+                        if attempt < max_retries - 1:
+                            self._log(f"   ⏳ Rate limit en {model_name}. Esperando {wait_time}s...")
                             time.sleep(wait_time)
                             continue
                         else:
-                            self._log(f"   ❌ Rate limit persistente para {model_name} tras {max_retries} intentos.")
-                            break  # Probar el siguiente modelo
+                            self._log(f"   ⚠️ Modelo {model_name} agotado tras {max_retries} intentos. Probando siguiente modelo...")
+                            break 
                     elif "permission_denied" in error_str or "403" in error_str:
-                        self._log(f"   ❌ Permiso denegado para {model_name} (archivo no accesible con esta key): {e}")
-                        break  # No tiene sentido reintentar, probar siguiente modelo
+                        self._log(f"   ❌ Permiso denegado (archivo no accesible con esta key).")
+                        break
                     else:
                         self._log(f"   ❌ Error de Gemini ({model_name}): {e}")
-                        break  # Si es otro error, probar el siguiente modelo
+                        break
         
-        raise Exception("Todos los modelos y API keys fallaron.")
+        raise Exception("No se pudo generar contenido tras agotar el pool de modelos.")
     
     def segment_by_fixed_duration(
         self,
@@ -526,6 +547,10 @@ class VideoProcessor:
         Extrae un chunk de video (MP4) o audio (WAV) usando ffmpeg.
         Para archivos de audio puro, extrae como WAV en lugar de MP4.
         """
+        if not self.ffmpeg_available:
+            self._log(f"❌ Error: FFmpeg no está disponible. No se puede extraer el segmento {segment.segment_id}.")
+            return None
+
         # Detectar si es audio puro
         source_ext = os.path.splitext(video_path)[1].lower()
         is_audio_source = source_ext in ('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus')
@@ -572,21 +597,23 @@ class VideoProcessor:
                     output_path
                 ]
             
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self._log(f"   🎬 Ejecutando FFmpeg para segmento {segment.segment_id}...")
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             
             if result.returncode != 0:
-                self._log(f"❌ Error de ffmpeg: {result.stderr.decode('utf-8', errors='ignore')[-200:]}")
+                self._log(f"❌ Error de FFmpeg (Código {result.returncode}): {result.stderr[-200:]}")
                 return None
             
             if os.path.exists(output_path):
                 segment.audio_path = output_path
+                self._log(f"      ✅ Segmento {segment.segment_id} extraído exitosamente.")
                 return output_path
             else:
-                self._log(f"❌ No se pudo extraer {'audio' if is_audio_source else 'video'} del segmento {segment.segment_id}")
+                self._log(f"❌ No se encontró el archivo de salida tras ejecutar FFmpeg para el segmento {segment.segment_id}")
                 return None
         
         except Exception as e:
-            self._log(f"❌ Error extrayendo segmento {segment.segment_id}: {e}")
+            self._log(f"❌ Excepción durante extracción de segmento {segment.segment_id}: {e}")
             return None
     
     def transcribe_video_segment(
@@ -737,20 +764,22 @@ class VideoProcessor:
     ) -> Dict[str, Any]:
         """
         Procesa un video completo: valida, segmenta, extrae audio y transcribe.
-        
-        Args:
-            video_path: Ruta al video
-            segment_duration: Duración objetivo de segmentos en segundos
-            overlap: Overlap entre segmentos en segundos
-            use_silence_detection: Usar detección de silencios
-            use_transcription_analysis: Usar análisis de transcripción
-            language: Idioma del video
-            
-        Returns:
-            Dict con información del procesamiento
         """
+        if not self.ffmpeg_available:
+            self._log("\n" + "!"*60)
+            self._log("❌ ERROR CRÍTICO: FFmpeg no está instalado o no se encuentra en el PATH.")
+            self._log("   La extracción de segmentos de video es IMPOSIBLE sin FFmpeg.")
+            self._log("   Instálalo con 'winget install ffmpeg' y reinicia la aplicación.")
+            self._log("!"*60 + "\n")
+            return {"success": False, "error": "FFmpeg missing"}
+
         is_audio_file = video_path.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus'))
         media_label = "AUDIO" if is_audio_file else "VIDEO"
+        media_icon = "🎵" if is_audio_file else "🎬"
+        
+        self._log(f"\n{'='*60}")
+        self._log(f"{media_icon} PROCESANDO {media_label}")
+        self._log(f"{'='*60}")
         media_icon = "🎧" if is_audio_file else "🎬"
         
         self._log("\n" + "="*60)

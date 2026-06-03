@@ -92,7 +92,10 @@ async def generate_flashcards(
     safe_text = privacy.anonymize(request.text_content)
     
     # 2. IA Generation
-    gemini = GeminiManager(api_key=os.getenv("GEMINI_API_KEY_1", ""))
+    gemini_keys = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_1", "")
+    gemini_model = os.getenv("GEMINI_MODEL") or "gemini-1.5-flash"
+    first_key = [k.strip() for k in gemini_keys.split(",") if k.strip()][0] if gemini_keys else ""
+    gemini = GeminiManager(api_key=first_key, model_name=gemini_model.split(",")[0].strip())
     
     all_cards = []
     for card_type in request.card_types:

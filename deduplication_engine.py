@@ -23,13 +23,26 @@ class DeduplicationEngine:
         self.log_callback = log_callback or print
         load_dotenv()
 
-        keys_raw = os.getenv("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEYS_OCR", "")
-        self.api_keys = [k.strip() for k in keys_raw.split(",") if k.strip()]
-        if not self.api_keys:
-            raise ValueError("No se encontraron llaves API (GEMINI_API_KEY o GEMINI_API_KEYS_OCR).")
+        # Cargar pool de llaves (Misma lógica que el generador)
+        kstr = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEYS_OCR") or os.getenv("GEMINI_API_KEY_1")
+        if kstr:
+            self.api_keys = [k.strip() for k in kstr.split(",") if k.strip()]
+        else:
+            # Fallback a recolección secuencial si no hay lista
+            self.api_keys = []
+            for i in range(1, 5):
+                k = os.getenv(f"GEMINI_API_KEY_{i}")
+                if k: self.api_keys.extend([x.strip() for x in k.split(",") if x.strip()])
 
-        models_raw = os.getenv("GEMINI_EMBEDDINGS", "gemini-embedding-2,text-embedding-004")
+        if not self.api_keys:
+            raise ValueError("No se encontraron llaves API (GEMINI_API_KEY).")
+
+        # Cargar pool de modelos de embedding
+        models_raw = os.getenv("GEMINI_EMBEDDING") or os.getenv("GEMINI_EMBEDDINGS") or "gemini-embedding-2,text-embedding-004"
         self.models = [m.strip() for m in models_raw.split(",") if m.strip()]
+        
+        # Dimensiones del vector (Configurable)
+        self.dimension = int(os.getenv("GEMINI_EMBEDDING_DIM", "768"))
 
         # ── Caché persistente: card._id → vector ─────────────────────────────
         self._front_cache: Dict[str, List[float]] = {}
@@ -115,7 +128,7 @@ class DeduplicationEngine:
             text = text_extractor(card)
             if not text.strip():
                 # Texto vacío → vector cero (evita llamada innecesaria)
-                dummy = [0.0] * 768
+                dummy = [0.0] * self.dimension
                 if cid:
                     cache[cid] = dummy
                 results.append(dummy)

@@ -155,6 +155,11 @@ class AnkiImportInterface:
         self.root.title("Flashcards to Anki Converter")
         self.root.geometry("1200x700")
         
+        # --- INFRAESTRUCTURA BASE (Debe ir primero) ---
+        import queue
+        self.ui_queue = queue.Queue()
+        self.root.after(100, self._process_ui_queue)
+        
         self.converter = FlashcardsConverter()
         self.anki_manager = AnkiSyncManager()
         self.flashcard_generator = None  # Se inicializa bajo demanda
@@ -245,10 +250,6 @@ class AnkiImportInterface:
         self.automatic_books_frame = None
         self.automatic_audio_frame = None
         
-        # --- NUEVO: Cola de mensajes para la UI ---
-        self.ui_queue = queue.Queue()
-        self.root.after(100, self._process_ui_queue)
-
         self.setup_ui()
         self.check_anki_status()
 
@@ -2885,8 +2886,8 @@ class AnkiImportInterface:
         msg += "Esto realizará:\n"
         msg += "1. Extracción OCR de cada sección\n"
         msg += "2. Generación de 4 tipos de flashcards con Gemini\n"
-        msg += "3. Importación automática a Anki\n\n"
-        msg += "Nota: Hay 60 segundos de espera entre secciones."
+        msg += "3. Almacenamiento en Sala de Espera\n\n"
+        msg += "Nota: Hay 60 segundos de espera entre secciones para evitar límites de API."
         
         if not messagebox.askyesno("Confirmar procesamiento", msg):
             return
@@ -2995,38 +2996,71 @@ class AnkiImportInterface:
         logger_func(f"      • Φ_C (Cobertura Topológica): {phi_c:.2f}")
 
     def _show_processing_summary(self, results: list):
-        """Muestra resumen del procesamiento y actualiza indicadores visuales."""
+        """Muestra resumen del procesamiento, llena sala de espera y actualiza indicadores."""
         self.auto_log("\n" + "="*60)
         self.auto_log("📊 RESUMEN FINAL DE PROCESAMIENTO")
         self.auto_log("="*60)
         
-        total_flashcards = 0
+        total_generated = 0
         successful_sections = 0
         
         for result in results:
             section_title = result.get("section", "Unknown")
+            if not result.get("success"):
+                self.auto_log(f"\n❌ {section_title}: ERROR")
+                continue
+                
+            successful_sections += 1
             self.auto_log(f"\n📁 {section_title}:")
             
-            # --- NUEVO: Mostrar métricas QYI por sección ---
+            # Mostrar métricas QYI
             if "qyi_metrics" in result:
                 self._log_qyi_metrics(result["qyi_metrics"], self.auto_log)
             
-            # Buscar la sección correspondiente para actualizar sus indicadores
-            pass
+            # Procesar cada tipo de tarjeta
+            section_results = result.get("results", {})
+            for card_type, res in section_results.items():
+                if res.get("success"):
+                    flashcards = res.get("flashcards", [])
+                    count = len(flashcards)
+                    deck = res.get("deck", "Default")
+                    
+                    if count > 0:
+                        # AGREGAR A SALA DE ESPERA (No automático)
+                        self.pending_flashcard_imports.append({
+                            "deck_name": deck,
+                            "card_type": card_type,
+                            "flashcards": flashcards
+                        })
+                        total_generated += count
+                        self.auto_log(f"   ✅ {card_type}: {count} cards generadas")
+                    
+                    # Actualizar UI (bolitas de estado)
+                    # Necesitamos encontrar el ID de la sección por su título
+                    for sid, sdata in self.image_sections.items():
+                        if sdata.title == section_title:
+                            self.root.after(0, lambda i=sid, t=card_type, c=count: 
+                                          self._update_section_status(i, t, True, c))
+                            break
+                else:
+                    self.auto_log(f"   ⚠️ {card_type}: Falló")
+
         self.auto_log(f"\n{'='*60}")
-        self.auto_log(f"✅ PROCESAMIENTO COMPLETADO")
+        self.auto_log(f"✅ GENERACIÓN COMPLETADA")
         self.auto_log(f"   • Secciones procesadas: {successful_sections}/{len(results)}")
-        self.auto_log(f"   • Total flashcards importadas: {total_flashcards}")
+        self.auto_log(f"   • Total flashcards en sala de espera: {total_generated}")
+        self.auto_log(f"   • ACCIÓN REQUERIDA: Presiona '✅ Ejecutar Sincronización' para importar.")
         self.auto_log("="*60 + "\n")
         
         # Actualizar botón de pendientes
         self.root.after(0, self._update_pending_button)
         
-        # Mostrar popup
+        # Mostrar popup informativo
         self.root.after(0, lambda: messagebox.showinfo(
-            "Procesamiento completado",
-            f"Secciones procesadas: {successful_sections}/{len(results)}\n"
-            f"Total flashcards importadas: {total_flashcards}"
+            "Generación Exitosa",
+            f"Se han generado {total_generated} flashcards.\n\n"
+            "Están en la 'Sala de Espera'.\n"
+            "Debes presionar '✅ Ejecutar Sincronización' para enviarlas a Anki."
         ))
     
     def _update_section_status(self, section_id: int, card_type: str, success: bool, count: int):
@@ -3407,8 +3441,8 @@ class AnkiImportInterface:
         msg = f"¿Procesar {len(sections_with_text)} sección(es) con {total_chars:,} caracteres?\n\n"
         msg += "Esto realizará:\n"
         msg += "1. Generación SECUENCIAL de flashcards con Gemini\n"
-        msg += "2. Importación automática a Anki\n\n"
-        msg += "Nota: El procesamiento es secuencial (API1→API2→API3→API4)."
+        msg += "2. Almacenamiento en Sala de Espera\n\n"
+        msg += "Nota: El procesamiento es secuencial para evitar límites de API."
         
         if not messagebox.askyesno("Confirmar procesamiento", msg):
             return
@@ -3476,25 +3510,41 @@ class AnkiImportInterface:
                 
                 results = self.flashcard_generator.generate_all_flashcards_sequential(texto)
                 
-                # Capturar métricas QYI generadas en este paso
+                # Capturar métricas QYI
                 qyi_metrics = getattr(self.flashcard_generator, 'last_evaluation_metrics', {})
                 
-                section_results = {
-                    "section": section.title,
-                    "success": True,
-                    "qyi_metrics": qyi_metrics,
-                    "card_counts": {}
-                }
+                # Determinar deck name base (Bisabuelo::Abuelo::Sección)
+                deck_base = ""
+                if bisabuelo_str:
+                    deck_base += f"{bisabuelo_str}::"
+                deck_base += f"{grandparent_str}::{section.title}"
                 
                 # Procesar resultados
                 for card_type, result in results.items():
                     if result.get("success"):
-                        # ... (lógica de conversión e importación existente) ...
-                        count = len(flashcard_list)
-                        section_results["card_counts"][card_type] = count
-                        total_flashcards += count
-                
-                processing_results.append(section_results)
+                        raw_content = result.get("content", "")
+                        tsv_content = self.converter.convert(raw_content, card_type)
+                        flashcard_list = self.flashcard_generator._parse_tsv_to_flashcards(tsv_content)
+                        
+                        if flashcard_list:
+                            count = len(flashcard_list)
+                            total_flashcards += count
+                            
+                            # AGREGAR A SALA DE ESPERA
+                            self.pending_flashcard_imports.append({
+                                "deck_name": deck_base,
+                                "card_type": card_type,
+                                "flashcards": flashcard_list
+                            })
+                            
+                            self.root.after(0, lambda sid=section.section_id, ct=card_type, c=count:
+                                          self._update_text_section_status(sid, ct, True, c))
+                        else:
+                            self.root.after(0, lambda sid=section.section_id, ct=card_type:
+                                          self._update_text_section_status(sid, ct, False, 0))
+                    else:
+                        self.root.after(0, lambda sid=section.section_id, ct=card_type:
+                                      self._update_text_section_status(sid, ct, False, 0))
             
             # Mostrar resumen final
             self.root.after(0, lambda: self._show_processing_summary(processing_results))
@@ -4616,8 +4666,11 @@ class AnkiImportInterface:
                         self.log(f"✗ {msg}")
                 
                 self.log(f"\n{'='*50}")
-                self.log(f"✓ Total imported: {total_imported} flashcards")
-                messagebox.showinfo("Success", f"Imported {total_imported} flashcards to Anki!")
+                self.log(f"✓ Total en sala de espera: {total_imported} flashcards")
+                self.root.after(0, self._update_pending_button)
+                messagebox.showinfo("Sala de Espera", 
+                                   f"Se han enviado {total_imported} flashcards a la Sala de Espera.\n\n"
+                                   "Ve a la pestaña de 'Sincronización' para revisarlas e importarlas.")
                 
             except Exception as e:
                 self.log(f"✗ Error: {str(e)}")

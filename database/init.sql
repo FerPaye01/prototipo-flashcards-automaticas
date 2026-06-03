@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS generated_flashcards (
     tags VARCHAR(255)[],
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     sync_status BOOLEAN DEFAULT FALSE,
-    embedding vector(1536) -- Placeholder for Gemini/OpenAI embeddings
+    embedding vector(768) -- Ajustar según GEMINI_EMBEDDING_DIM
 );
 
 -- Table for document chunks (for RAG/LangChain)
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     id SERIAL PRIMARY KEY,
     session_id VARCHAR(100) REFERENCES session_metadata(session_id),
     content TEXT,
-    embedding vector(1536),
+    embedding vector(768), -- Ajustar según GEMINI_EMBEDDING_DIM
     meta_data JSONB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
