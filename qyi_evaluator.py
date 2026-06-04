@@ -52,7 +52,13 @@ class QYIEvaluator:
                 pr_max = max(all_pr)
                 pr_range = pr_max - pr_min if pr_max > pr_min else 1.0
                 
-                normalized_pr = {k: (v - pr_min) / pr_range for k, v in pagerank_scores.items()}
+                if pr_max > pr_min:
+                    # Normalización min-max adaptativa con un piso mínimo de 0.20 para evitar penalizar nodos hoja a 0.0
+                    min_floor = 0.20
+                    normalized_pr = {k: min_floor + (1.0 - min_floor) * (v - pr_min) / pr_range for k, v in pagerank_scores.items()}
+                else:
+                    # Evitar penalizar con 0.0 cuando todos los conceptos tienen la misma importancia
+                    normalized_pr = {k: 0.5 for k in pagerank_scores.keys()}
                 
                 sum_pr = 0.0
                 for i in range(M):
@@ -85,33 +91,45 @@ class EduKGRanker:
     def __init__(self):
         self.graph = nx.DiGraph()
 
-    def build_graph(self, concepts: List[str], text_content: str, emphasis: Dict[str, float] = None):
+    def build_graph(self, concepts: List[str], text_content: str, emphasis: Dict[str, float] = None, edges: List[Tuple[str, str]] = None):
         """
-        Construye el grafo basado en co-ocurrencia de conceptos en el texto.
+        Construye el grafo basado en relaciones explícitas (aristas) o co-ocurrencia de conceptos en el texto.
         """
+        self.graph.clear() # Limpiar el grafo de ejecuciones anteriores
         emphasis = emphasis or {}
         
         # Añadir nodos
         for concept in concepts:
             self.graph.add_node(concept.lower().strip(), weight=emphasis.get(concept, 1.0))
 
-        # Añadir aristas basadas en co-ocurrencia en párrafos
-        paragraphs = text_content.split('\n\n')
-        for para in paragraphs:
-            para_lower = para.lower()
-            found_concepts = []
-            for concept in concepts:
-                if concept.lower() in para_lower:
-                    found_concepts.append(concept.lower().strip())
-            
-            # Crear aristas entre conceptos que aparecen en el mismo párrafo
-            for i in range(len(found_concepts)):
-                for j in range(i + 1, len(found_concepts)):
-                    u, v = found_concepts[i], found_concepts[j]
-                    if self.graph.has_edge(u, v):
-                        self.graph[u][v]['weight'] += 1.0
+        # Añadir aristas explícitas si se proporcionan
+        if edges:
+            for u, v in edges:
+                u_clean = u.lower().strip()
+                v_clean = v.lower().strip()
+                if self.graph.has_node(u_clean) and self.graph.has_node(v_clean):
+                    if self.graph.has_edge(u_clean, v_clean):
+                        self.graph[u_clean][v_clean]['weight'] += 1.0
                     else:
-                        self.graph.add_edge(u, v, weight=1.0)
+                        self.graph.add_edge(u_clean, v_clean, weight=1.0)
+        else:
+            # Fallback: Añadir aristas basadas en co-ocurrencia en párrafos
+            paragraphs = text_content.split('\n\n')
+            for para in paragraphs:
+                para_lower = para.lower()
+                found_concepts = []
+                for concept in concepts:
+                    if concept.lower() in para_lower:
+                        found_concepts.append(concept.lower().strip())
+                
+                # Crear aristas entre conceptos que aparecen en el mismo párrafo
+                for i in range(len(found_concepts)):
+                    for j in range(i + 1, len(found_concepts)):
+                        u, v = found_concepts[i], found_concepts[j]
+                        if self.graph.has_edge(u, v):
+                            self.graph[u][v]['weight'] += 1.0
+                        else:
+                            self.graph.add_edge(u, v, weight=1.0)
 
     def calculate_pagerank(self, personalization: Dict[str, float] = None) -> Dict[str, float]:
         if not self.graph.nodes:

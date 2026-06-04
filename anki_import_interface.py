@@ -253,6 +253,7 @@ class AnkiImportInterface:
         
         self.setup_ui()
         self.check_anki_status()
+        self._load_pending_queue()
 
     def _process_ui_queue(self):
         """Heartbeat de la interfaz gráfica: procesa mensajes de hilos en segundo plano."""
@@ -1409,6 +1410,8 @@ class AnkiImportInterface:
 
     def process_book_section_auto(self, section):
         # Implementación similar a texto pero con log de libros
+        if not self._check_and_confirm_clear_pending_queue(mode="book"):
+            return
         self.book_log(f"🚀 Iniciando procesamiento: {section.title}...")
         if self.flashcard_generator:
             self.flashcard_generator.reset_exhausted_keys()
@@ -1620,12 +1623,18 @@ class AnkiImportInterface:
 
     def _generate_cards_for_book_section(self, section: ImageSection):
         """Wrapper asíncrono para procesar una sección individual."""
-        threading.Thread(target=self._generate_cards_for_book_section_logic, args=(section,), daemon=True).start()
+        def run_single():
+            self._generate_cards_for_book_section_logic(section)
+            self._save_pending_queue()
+            self._update_pending_button()
+        threading.Thread(target=run_single, daemon=True).start()
 
     def process_all_book_sections(self):
         """Procesa todas las secciones del libro de forma secuencial."""
         if not self.book_sections:
             messagebox.showwarning("Sin secciones", "No hay secciones de libro para procesar.")
+            return
+        if not self._check_and_confirm_clear_pending_queue(mode="book"):
             return
         if self.flashcard_generator:
             self.flashcard_generator.reset_exhausted_keys()
@@ -1640,6 +1649,8 @@ class AnkiImportInterface:
                     self.book_log("⌛ Esperando 10 segundos entre secciones para estabilidad...")
                     time.sleep(10)
             self.book_log("✅ LIBRO COMPLETO PROCESADO.")
+            self._save_pending_queue()
+            self._update_pending_button()
 
         threading.Thread(target=run_all_sequentially, daemon=True).start()
 
@@ -2907,6 +2918,9 @@ class AnkiImportInterface:
             messagebox.showwarning("En proceso", "Ya hay un procesamiento en curso.")
             return
 
+        if not self._check_and_confirm_clear_pending_queue(mode="auto"):
+            return
+
         if self.flashcard_generator:
             self.flashcard_generator.reset_exhausted_keys()
         
@@ -3085,7 +3099,8 @@ class AnkiImportInterface:
         log_func(f"   • ACCIÓN REQUERIDA: Presiona '✅ Ejecutar Sincronización' para importar.")
         log_func("="*60 + "\n")
         
-        # Actualizar botón de pendientes
+        # Actualizar botón de pendientes y guardar en disco
+        self._save_pending_queue()
         self.root.after(0, self._update_pending_button)
         
         # Mostrar popup informativo
@@ -3477,6 +3492,9 @@ class AnkiImportInterface:
         
         if self.is_processing:
             messagebox.showwarning("En proceso", "Ya hay un procesamiento en curso.")
+            return
+
+        if not self._check_and_confirm_clear_pending_queue(mode="text"):
             return
 
         if self.flashcard_generator:
@@ -4301,6 +4319,9 @@ class AnkiImportInterface:
         if self.is_processing:
             messagebox.showwarning("En proceso", "Ya hay un procesamiento en curso.")
             return
+
+        if not self._check_and_confirm_clear_pending_queue(mode="video"):
+            return
         
         # Confirmar
         total_chars = sum(s.get_total_chars() for s in self.video_sections)
@@ -4469,6 +4490,9 @@ class AnkiImportInterface:
             self.video_log(f"   → Usa '🧠 Filtrar Interferencia (IA)' para revisar duplicados")
             self.video_log(f"   → Luego '✅ Ejecutar Sincronización' para importar a Anki")
             self.video_log(f"{'='*60}\n")
+            
+            self._save_pending_queue()
+            self.root.after(0, self._update_pending_button)
             
             # Mostrar popup
             self.root.after(0, lambda: messagebox.showinfo(
@@ -5357,6 +5381,12 @@ class AnkiImportInterface:
             self.text_sections.clear()
             self.text_section_counter = 0
             self.hierarchy_counter = 0
+            
+            # Limpiar cola de pendientes al recuperar sesión de texto
+            self.pending_flashcard_imports = []
+            self._save_pending_queue()
+            self._update_pending_button()
+            self.text_log("🗑️ Sala de espera limpiada al recuperar una sesión de texto.")
         
         # Recuperar secciones
         recovered_count = 0
@@ -5544,6 +5574,12 @@ class AnkiImportInterface:
         
     def _recover_video_session(self, session_data: dict):
         """Recupera la sesión de video cargando sus segmentos."""
+        # Limpiar cola de pendientes al recuperar sesión de video
+        self.pending_flashcard_imports = []
+        self._save_pending_queue()
+        self._update_pending_button()
+        self.video_log("🗑️ Sala de espera limpiada al recuperar una sesión de video.")
+
         # Restaurar configuración de jerarquía si existe
         if "great_grandparent" in session_data:
             self.great_grandparent_deck.set(session_data["great_grandparent"])
@@ -5632,6 +5668,8 @@ class AnkiImportInterface:
         # --- NUEVO: Recargar flashcards generadas en la Sala de Espera ---
         fc_path = session_data.get("flashcard_session_path", "") or folder
         self._load_flashcards_from_session(fc_path, session_data)
+        self._save_pending_queue()
+        self._update_pending_button()
 
     def _load_flashcards_from_session(self, session_path: str, session_data: dict):
         """
@@ -5751,6 +5789,12 @@ class AnkiImportInterface:
             self.thumbnail_refs.clear()
             self.sections.clear()
             self.section_counter = 0
+            
+            # Limpiar cola de pendientes al recuperar sesión de imágenes
+            self.pending_flashcard_imports = []
+            self._save_pending_queue()
+            self._update_pending_button()
+            self.auto_log("🗑️ Sala de espera limpiada al recuperar una sesión de imágenes.")
         
         # Recuperar secciones
         recovered_count = 0
@@ -5860,6 +5904,12 @@ class AnkiImportInterface:
         """Recupera la sesión de libro cargando sus secciones."""
         self.clear_all_book_sections()
         
+        # Limpiar cola de pendientes al recuperar sesión de libro
+        self.pending_flashcard_imports = []
+        self._save_pending_queue()
+        self._update_pending_button()
+        self.book_log("🗑️ Sala de espera limpiada al recuperar una sesión de libro.")
+        
         self.great_grandparent_deck.set(session_data.get("great_grandparent", ""))
         self.grandparent_deck.set(session_data.get("grandparent", ""))
         self.parent_prefix.set(session_data.get("father_prefix", "Sección"))
@@ -5889,6 +5939,78 @@ class AnkiImportInterface:
 
     # ==================== FLASHCARDS PENDIENTES ====================
     
+    def _check_and_confirm_clear_pending_queue(self, mode: str = "auto") -> bool:
+        """
+        Verifica si hay flashcards pendientes en la sala de espera (QYI).
+        Pregunta al usuario si desea acumularlas o limpiarlas.
+        Retorna True si el proceso puede continuar (limpiando o acumulando),
+        o False si el usuario cancela la operación.
+        """
+        if not self.pending_flashcard_imports:
+            return True
+            
+        count = len(self.pending_flashcard_imports)
+        msg = f"Tienes {count} lote(s) de tarjetas pendientes en la Sala de Espera (QYI).\n\n"
+        msg += "¿Deseas CONSERVAR las tarjetas existentes en la sala de espera y acumular las nuevas?\n\n"
+        msg += "• Selecciona 'Sí' para conservar y acumular.\n"
+        msg += "• Selecciona 'No' para LIMPIAR la Sala de Espera antes de empezar.\n"
+        msg += "• Selecciona 'Cancelar' para no iniciar la generación."
+        
+        answer = messagebox.askyesnocancel("Tarjetas Pendientes detectadas", msg)
+        
+        # Obtener la función de log adecuada para el modo
+        log_func = self.auto_log
+        if mode == "book":
+            log_func = self.book_log
+        elif mode == "text":
+            log_func = self.text_log
+        elif mode == "video":
+            log_func = self.video_log
+        elif mode == "audio":
+            log_func = self.audio_log
+            
+        if answer is None:
+            # Seleccionó Cancelar
+            log_func("🚫 Generación cancelada por el usuario debido a tarjetas pendientes en sala de espera.")
+            return False
+        elif answer is False:
+            # Seleccionó No (Limpiar sala de espera)
+            self.pending_flashcard_imports = []
+            self._save_pending_queue()
+            self._update_pending_button()
+            log_func("🗑️ Sala de espera limpiada antes de iniciar la nueva generación.")
+        else:
+            # Seleccionó Sí (Conservar)
+            log_func("📋 Conservando tarjetas pendientes en la sala de espera para acumular las nuevas.")
+            
+        return True
+
+    def _save_pending_queue(self):
+        """Guarda la cola de flashcards pendientes en un archivo JSON en disco."""
+        try:
+            queue_file = os.path.join(MASTER_FOLDER, "pending_queue.json")
+            if not self.pending_flashcard_imports:
+                if os.path.exists(queue_file):
+                    os.remove(queue_file)
+                return
+            os.makedirs(MASTER_FOLDER, exist_ok=True)
+            with open(queue_file, "w", encoding="utf-8") as f:
+                json.dump(self.pending_flashcard_imports, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.auto_log(f"⚠️ Error al guardar cola de pendientes: {e}")
+
+    def _load_pending_queue(self):
+        """Carga la cola de flashcards pendientes desde el disco si existe."""
+        try:
+            queue_file = os.path.join(MASTER_FOLDER, "pending_queue.json")
+            if os.path.exists(queue_file):
+                with open(queue_file, "r", encoding="utf-8") as f:
+                    self.pending_flashcard_imports = json.load(f)
+                self.auto_log(f"📂 Sala de espera recuperada: {len(self.pending_flashcard_imports)} lotes de flashcards cargados desde pending_queue.json")
+                self._update_pending_button()
+        except Exception as e:
+            self.auto_log(f"⚠️ Error al cargar cola de pendientes: {e}")
+
     def _update_pending_button(self):
         """Actualiza el texto del botón de pendientes con la cantidad."""
         try:
@@ -5896,12 +6018,14 @@ class AnkiImportInterface:
             
             # Update all pending buttons that might exist in different tabs
             pending_buttons = []
-            if hasattr(self, "pending_btn"):
+            if hasattr(self, "pending_btn") and self.pending_btn:
                 pending_buttons.append(self.pending_btn)
-            if hasattr(self, "pending_text_btn"):
+            if hasattr(self, "pending_text_btn") and self.pending_text_btn:
                 pending_buttons.append(self.pending_text_btn)
-            if hasattr(self, "pending_video_btn"):
+            if hasattr(self, "pending_video_btn") and self.pending_video_btn:
                 pending_buttons.append(self.pending_video_btn)
+            if hasattr(self, "pending_audio_btn") and self.pending_audio_btn:
+                pending_buttons.append(self.pending_audio_btn)
                 
             for btn in pending_buttons:
                 if count > 0:
@@ -6584,6 +6708,14 @@ class AnkiImportInterface:
     def process_audio_sections(self):
         """Procesa secciones de audio para generar flashcards."""
         if not self.audio_sections: return
+        
+        if self.is_processing:
+            messagebox.showwarning("En proceso", "Ya hay un procesamiento en curso.")
+            return
+
+        if not self._check_and_confirm_clear_pending_queue(mode="audio"):
+            return
+            
         self.is_processing = True
         self.process_audio_sections_btn.config(state="disabled", text="⏳ Procesando...")
         
@@ -6790,6 +6922,12 @@ class AnkiImportInterface:
         self.current_audio_session = session["folder"]
         self.current_audio_segments = []
         
+        # Limpiar cola de pendientes al recuperar sesión de audio
+        self.pending_flashcard_imports = []
+        self._save_pending_queue()
+        self._update_pending_button()
+        self.audio_log("🗑️ Sala de espera limpiada al recuperar una sesión de audio.")
+        
         for idx, chunk_file in enumerate(session["chunk_files"], 1):
             chunk_path = os.path.join(session["chunks_dir"], chunk_file)
             try:
@@ -6834,6 +6972,8 @@ class AnkiImportInterface:
         def on_dedup_complete(filtered_imports):
             self.pending_flashcard_imports = filtered_imports
             self.auto_log("✅ Proceso de filtrado semántico finalizado en memoria.")
+            self._save_pending_queue()
+            self._update_pending_button()
             
         DeduplicationUI(self.root, self.pending_flashcard_imports, on_dedup_complete, engine=self.dedup_engine)
 
@@ -6854,8 +6994,10 @@ class AnkiImportInterface:
         def on_eval_complete(filtered_imports):
             self.pending_flashcard_imports = filtered_imports
             self._mode_log("✅ Proceso de evaluación y filtrado didáctico finalizado en memoria.")
+            self._save_pending_queue()
+            self._update_pending_button()
             
-        EvaluationUI(self.root, self.pending_flashcard_imports, on_eval_complete, generator=self.flashcard_generator)
+        EvaluationUI(self.root, self.pending_flashcard_imports, on_eval_complete, generator=self.flashcard_generator, app=self)
 
     def execute_deduplicated_import(self):
         """Sincroniza la sala de espera filtrada a Anki."""
@@ -6893,6 +7035,8 @@ class AnkiImportInterface:
         
         # Limpiar la sala de espera
         self.pending_flashcard_imports = []
+        self._save_pending_queue()
+        self._update_pending_button()
 
 def main():
     """Inicia la aplicación."""

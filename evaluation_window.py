@@ -3,10 +3,11 @@ from tkinter import ttk, messagebox
 import threading
 import re
 import json
-from typing import List, Dict, Any, Callable
+import os
+from typing import List, Dict, Any, Callable, Tuple
 
 class EvaluationUI(tk.Toplevel):
-    def __init__(self, parent, pending_imports: List[Dict[str, Any]], on_complete: Callable, generator):
+    def __init__(self, parent, pending_imports: List[Dict[str, Any]], on_complete: Callable, generator, app=None):
         super().__init__(parent)
         self.title("🎓 Rúbrica Pedagógica e Indicadores QYI (IA)")
         self.geometry("1200x700")
@@ -16,6 +17,7 @@ class EvaluationUI(tk.Toplevel):
         self.pending_imports = pending_imports
         self.on_complete = on_complete
         self.generator = generator
+        self.app = app
         
         # Guardar una copia profunda/segura original en caso de restauración
         self.original_flat_cards = []
@@ -69,6 +71,33 @@ class EvaluationUI(tk.Toplevel):
         lbl_explain = tk.Message(explain_frame, text=explain_text, width=320, font=("Segoe UI", 9), justify="left", fg="#333333")
         lbl_explain.pack(fill="both", expand=True)
         
+        # Sección: Fuente de Consulta / Transcripción Completa
+        self.source_frame = ttk.LabelFrame(left_panel, text="📖 Fuente de Referencia", padding=10)
+        self.source_frame.pack(fill="x", pady=(0, 10))
+        
+        self.lbl_source_status = ttk.Label(self.source_frame, text="Estado: No detectada", font=("Segoe UI", 9, "bold"))
+        self.lbl_source_status.pack(anchor="w", pady=2)
+        
+        self.lbl_source_info = ttk.Label(self.source_frame, text="Se usará fallback de flashcards para el grafo.", font=("Segoe UI", 9, "italic"), foreground="gray")
+        self.lbl_source_info.pack(anchor="w", pady=2)
+        
+        btn_layout = ttk.Frame(self.source_frame)
+        btn_layout.pack(fill="x", pady=2)
+        
+        self.btn_reconstruct = ttk.Button(btn_layout, text="🔗 Unificar Segmentos", command=self._reconstruct_source_from_segments, state="disabled")
+        self.btn_reconstruct.pack(side="left", padx=2, fill="x", expand=True)
+        
+        self.btn_load_txt = ttk.Button(btn_layout, text="📂 Cargar TXT", command=self._load_manual_txt_source)
+        self.btn_load_txt.pack(side="left", padx=2, fill="x", expand=True)
+        
+        btn_layout2 = ttk.Frame(self.source_frame)
+        btn_layout2.pack(fill="x", pady=2)
+        
+        self.btn_transcribe_ia = ttk.Button(btn_layout2, text="🔊 Transcribir Segmentos (IA)", command=self._transcribe_segments_via_ia, state="disabled")
+        self.btn_transcribe_ia.pack(fill="x", expand=True)
+        
+        self._detect_source_context()
+        
         # Sección 2: Ejecución
         run_frame = ttk.LabelFrame(left_panel, text="⚙️ Ejecutar Evaluación", padding=10)
         run_frame.pack(fill="x", pady=(0, 10))
@@ -105,17 +134,35 @@ class EvaluationUI(tk.Toplevel):
         filter_frame = ttk.LabelFrame(right_panel, text="⚡ Filtros y Descarte Rápido", padding=10)
         filter_frame.pack(fill="x", pady=(0, 10))
         
-        ttk.Label(filter_frame, text="Calidad Mínima (0-10):").grid(row=0, column=0, sticky="w", padx=5)
+        # Fila 0: Calidad, Utilidad y Alto Impacto
+        ttk.Label(filter_frame, text="Calidad Mínima (0-10):").grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.spin_quality = ttk.Spinbox(filter_frame, from_=0, to=10, width=5)
         self.spin_quality.set("5")
-        self.spin_quality.grid(row=0, column=1, sticky="w", padx=5)
+        self.spin_quality.grid(row=0, column=1, sticky="w", padx=5, pady=2)
+        
+        ttk.Label(filter_frame, text="Utilidad Mínima (0.0-1.0):").grid(row=0, column=2, sticky="w", padx=15, pady=2)
+        self.spin_utility = ttk.Spinbox(filter_frame, from_=0.0, to=1.0, increment=0.05, width=6)
+        self.spin_utility.set("0.50")
+        self.spin_utility.grid(row=0, column=3, sticky="w", padx=5, pady=2)
         
         self.check_only_high = tk.BooleanVar(value=False)
         chk_high = ttk.Checkbutton(filter_frame, text="Solo tarjetas de Alto Impacto", variable=self.check_only_high)
-        chk_high.grid(row=0, column=2, sticky="w", padx=15)
+        chk_high.grid(row=0, column=4, sticky="w", padx=15, pady=2)
+        
+        # Fila 1: Concepto, Texto Búsqueda y Botón
+        ttk.Label(filter_frame, text="Filtrar Concepto:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.combo_concept_filter = ttk.Combobox(filter_frame, state="readonly", width=18)
+        self.combo_concept_filter.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        self.combo_concept_filter.set("Todos")
+        
+        ttk.Label(filter_frame, text="Buscar Texto:").grid(row=1, column=2, sticky="w", padx=15, pady=5)
+        self.entry_search = ttk.Entry(filter_frame, width=15)
+        self.entry_search.grid(row=1, column=3, sticky="w", padx=5, pady=5)
         
         btn_apply_filter = ttk.Button(filter_frame, text="🧹 Descartar que no cumplan", command=self._apply_quick_filters)
-        btn_apply_filter.grid(row=0, column=3, sticky="e", padx=10)
+        btn_apply_filter.grid(row=1, column=4, sticky="e", padx=10, pady=5)
+        
+        self._update_concept_filter_dropdown()
         
         # Sección 2: Tabla de Tarjetas
         table_frame = ttk.LabelFrame(right_panel, text="📋 Listado de Tarjetas en Sala de Espera")
@@ -160,6 +207,9 @@ class EvaluationUI(tk.Toplevel):
         btn_restore = ttk.Button(actions_frame, text="🔄 Restaurar Todo", command=self._restore_original)
         btn_restore.pack(side="left", padx=5)
         
+        btn_clear_all = ttk.Button(actions_frame, text="🗑️ Vaciar Sala de Espera", command=self._clear_entire_waiting_room)
+        btn_clear_all.pack(side="left", padx=5)
+        
         self.lbl_card_stats = ttk.Label(actions_frame, text="Total en lista: --")
         self.lbl_card_stats.pack(side="left", padx=15)
         
@@ -197,6 +247,149 @@ class EvaluationUI(tk.Toplevel):
             )
         self.lbl_card_stats.config(text=f"Total en lista: {len(self.flat_flashcards)} tarjetas")
 
+    def _clear_entire_waiting_room(self):
+        """Vacía completamente la sala de espera."""
+        if not messagebox.askyesno("Vaciar Sala de Espera", "¿Estás seguro de que deseas vaciar completamente la Sala de Espera?\n\nEsto eliminará permanentemente todas las flashcards pendientes de importar."):
+            return
+            
+        # Vaciar colecciones en la ventana actual
+        self.flat_flashcards = []
+        self.original_flat_cards = []
+        self._update_table_view()
+        
+        # Vaciar la cola en la aplicación principal si está disponible
+        if self.app:
+            self.app.pending_flashcard_imports = []
+            self.app._save_pending_queue()
+            self.app._update_pending_button()
+            
+        messagebox.showinfo("Sala de Espera vaciada", "Se ha vaciado la sala de espera correctamente.")
+        self.destroy()
+
+    def _detect_source_context(self):
+        """Detecta si hay una fuente completa disponible en la aplicación principal."""
+        if not self.app:
+            return
+            
+        # 1. Caso: Hay segmentos de video o audio con transcripciones que se pueden reconstruir
+        mode = getattr(self.app, 'current_mode', '')
+        segments = []
+        if mode == "automatic_videos":
+            segments = getattr(self.app, 'current_video_segments', [])
+        elif mode == "automatic_audio":
+            segments = getattr(self.app, 'current_audio_segments', [])
+            
+        segments_with_trans = [s for s in segments if getattr(s, 'transcription_text', '')]
+        
+        if segments:
+            # Si hay segmentos en la sesión, el usuario siempre puede transcribir y unificar de nuevo
+            self.btn_transcribe_ia.config(state="normal")
+            
+            if segments_with_trans:
+                self.btn_reconstruct.config(state="normal")
+            else:
+                self.btn_reconstruct.config(state="disabled")
+                
+            if hasattr(self.app, 'current_source_context') and self.app.current_source_context:
+                char_count = len(self.app.current_source_context)
+                self.lbl_source_status.config(text="✅ Fuente unificada detectada", foreground="green")
+                self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres lista para PageRank.\nSegmentos transcritos: {len(segments_with_trans)}/{len(segments)}.", foreground="black")
+            elif segments_with_trans:
+                self.lbl_source_status.config(text="⚠️ Fuente no unificada", foreground="orange")
+                self.lbl_source_info.config(text=f"Se detectaron {len(segments_with_trans)} de {len(segments)} segmentos con texto.\nPuedes unificarlos para el PageRank.", foreground="black")
+            else:
+                self.lbl_source_status.config(text="⚠️ Sin transcripciones", foreground="red")
+                self.lbl_source_info.config(text="Debes transcribir los segmentos para poder unificarlos.", foreground="black")
+            return
+            
+        # 2. Caso manual o sin segmentos
+        if hasattr(self.app, 'current_source_context') and self.app.current_source_context:
+            char_count = len(self.app.current_source_context)
+            self.lbl_source_status.config(text=f"✅ Fuente unificada detectada", foreground="green")
+            self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres lista para PageRank.", foreground="black")
+            self.btn_reconstruct.config(state="disabled")
+            self.btn_transcribe_ia.config(state="disabled")
+            return
+            
+        self.lbl_source_status.config(text="❌ Fuente no detectada", foreground="red")
+        self.lbl_source_info.config(text="Se usará fallback de flashcards para el grafo.", foreground="gray")
+        self.btn_reconstruct.config(state="disabled")
+        self.btn_transcribe_ia.config(state="disabled")
+
+    def _reconstruct_source_from_segments(self):
+        """Concatenación local de las transcripciones de segmentos disponibles."""
+        if not self.app:
+            return
+            
+        mode = getattr(self.app, 'current_mode', '')
+        segments = []
+        if mode == "automatic_videos":
+            segments = getattr(self.app, 'current_video_segments', [])
+        elif mode == "automatic_audio":
+            segments = getattr(self.app, 'current_audio_segments', [])
+            
+        segments_with_trans = sorted([s for s in segments if getattr(s, 'transcription_text', '')], key=lambda x: getattr(x, 'segment_id', 0))
+        
+        if not segments_with_trans:
+            messagebox.showwarning("Error", "No se encontraron transcripciones de segmentos para unificar.")
+            return
+            
+        # Concatenar
+        reconstructed = []
+        for s in segments_with_trans:
+            sid = getattr(s, 'segment_id', 0)
+            text = getattr(s, 'transcription_text', '').strip()
+            reconstructed.append(f"--- Segmento {sid} ---\n{text}")
+            
+        full_text = "\n\n".join(reconstructed)
+        self.app.current_source_context = full_text
+        
+        # Guardar también la fuente unificada en el directorio de la sesión si es que existe
+        session_dir = None
+        if mode == "automatic_videos":
+            session_dir = getattr(self.app, 'current_video_session', None)
+        elif mode == "automatic_audio":
+            session_dir = getattr(self.app, 'current_audio_session', None)
+            
+        if session_dir and os.path.isdir(session_dir):
+            try:
+                os.makedirs(os.path.join(session_dir, "original_text"), exist_ok=True)
+                source_file = os.path.join(session_dir, "original_text", "reconstructed_faithful_source.txt")
+                with open(source_file, 'w', encoding='utf-8') as f:
+                    f.write(full_text)
+                self.app.video_log(f"💾 Fuente unificada reconstruida y guardada en sesión: {source_file}")
+            except Exception as e:
+                print(f"⚠️ Error guardando fuente unificada reconstruida: {e}")
+                
+        char_count = len(full_text)
+        self.lbl_source_status.config(text="✅ Fuente reconstruida y unificada", foreground="green")
+        self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres creada localmente.", foreground="black")
+        self.btn_reconstruct.config(state="disabled")
+        messagebox.showinfo("Unificación Exitosa", f"Se han unificado {len(segments_with_trans)} segmentos en una sola fuente de consulta de {char_count:,} caracteres.")
+
+    def _load_manual_txt_source(self):
+        """Permite cargar un archivo de texto manual como fuente de consulta."""
+        from tkinter import filedialog
+        file_path = filedialog.askopenfilename(
+            title="Seleccionar archivo de texto fuente",
+            filetypes=[("Archivos de texto", "*.txt"), ("Todos los archivos", "*.*")]
+        )
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                if not content:
+                    messagebox.showwarning("Archivo Vacío", "El archivo seleccionado está vacío.")
+                    return
+                if self.app:
+                    self.app.current_source_context = content
+                
+                char_count = len(content)
+                self.lbl_source_status.config(text="✅ Fuente cargada desde TXT", foreground="green")
+                self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres cargada desde {os.path.basename(file_path)}.", foreground="black")
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo leer el archivo:\n{e}")
+
     def _start_evaluation(self):
         if not self.flat_flashcards:
             messagebox.showwarning("Sin tarjetas", "No hay tarjetas para evaluar.")
@@ -210,25 +403,60 @@ class EvaluationUI(tk.Toplevel):
 
     def _run_evaluation_thread(self):
         try:
-            # 1. Construir texto de referencia concatenado
-            text_ref = "\n\n".join([
-                f"P: {c.get('front', '')}\nR: {c.get('back', '')}"
-                for c in self.flat_flashcards
-            ])
+            # 1. Obtener el texto de referencia de la fuente si está disponible
+            text_ref = ""
+            if self.app and hasattr(self.app, 'current_source_context') and self.app.current_source_context:
+                text_ref = self.app.current_source_context
+                self.after(0, lambda: self.lbl_status.config(text="Estado: Usando fuente de consulta unificada..."))
             
-            # 2. Extraer conceptos usando el generador
-            self.after(0, lambda: self.lbl_status.config(text="Estado: Analizando mapa de conceptos..."))
-            concepts = self.generator.extract_concepts(text_ref)
+            # Si no está unificada en memoria, intentar unificarla automáticamente desde segmentos transcritos
+            if not text_ref and self.app:
+                mode = getattr(self.app, 'current_mode', '')
+                segments = []
+                if mode == "automatic_videos":
+                    segments = getattr(self.app, 'current_video_segments', [])
+                elif mode == "automatic_audio":
+                    segments = getattr(self.app, 'current_audio_segments', [])
+                
+                segments_with_trans = sorted([s for s in segments if getattr(s, 'transcription_text', '')], key=lambda x: getattr(x, 'segment_id', 0))
+                if segments_with_trans:
+                    reconstructed = []
+                    for s in segments_with_trans:
+                        sid = getattr(s, 'segment_id', 0)
+                        text = getattr(s, 'transcription_text', '').strip()
+                        reconstructed.append(f"--- Segmento {sid} ---\n{text}")
+                    full_text = "\n\n".join(reconstructed)
+                    self.app.current_source_context = full_text
+                    text_ref = full_text
+                    
+                    self.after(0, lambda: self.lbl_source_status.config(text="✅ Fuente unificada automáticamente", foreground="green"))
+                    self.after(0, lambda: self.lbl_source_info.config(text=f"Fuente de {len(full_text):,} caracteres creada automáticamente.", foreground="black"))
+                    self.after(0, lambda: self.btn_reconstruct.config(state="disabled"))
+                    self.after(0, lambda: self.lbl_status.config(text="Estado: Usando fuente de consulta unificada..."))
+
+            if not text_ref:
+                # Fallback: construir texto de referencia concatenado desde las flashcards
+                text_ref = "\n\n".join([
+                    f"P: {c.get('front', '')}\nR: {c.get('back', '')}"
+                    for c in self.flat_flashcards
+                ])
+                self.after(0, lambda: self.lbl_status.config(text="Estado: Usando fallback de flashcards..."))
+            
+            # 2. Watchdog de evaluación en lotes (evita timeouts y límites de tokens)
+            evals = self._watchdog_evaluate_with_explanation(text_ref, self.flat_flashcards)
+            
+            # 3. Recopilar los conceptos específicos extraídos por el Watchdog de cada tarjeta
+            concepts = list(set([e.get('concepto', 'general').lower().strip() for e in evals]))
             if not concepts:
                 concepts = ["general"]
                 
-            # 3. Construir grafo y PageRank
-            self.after(0, lambda: self.lbl_status.config(text="Estado: Calculando PageRank del Grafo..."))
-            self.generator.kg_ranker.build_graph(concepts, text_ref)
-            pagerank = self.generator.kg_ranker.calculate_pagerank()
+            # 4. Construir grafo y calcular PageRank
+            self.after(0, lambda: self.lbl_status.config(text="Estado: Extrayendo relaciones semánticas entre conceptos..."))
+            edges = self._extract_concept_relations_via_llm(concepts, text_ref)
             
-            # 4. Watchdog de evaluación en lotes (evita timeouts y límites de tokens)
-            evals = self._watchdog_evaluate_with_explanation(text_ref, self.flat_flashcards)
+            self.after(0, lambda: self.lbl_status.config(text="Estado: Calculando PageRank del Grafo..."))
+            self.generator.kg_ranker.build_graph(concepts, text_ref, edges=edges)
+            pagerank = self.generator.kg_ranker.calculate_pagerank()
             
             # 5. Mapear y computar puntuación de utilidad individual
             alpha, beta, gamma = 0.3, 0.4, 0.3
@@ -247,10 +475,9 @@ class EvaluationUI(tk.Toplevel):
                 calidad = eval_data.get('calidad', 7) if eval_data else 7
                 impacto = eval_data.get('impacto', 'N') if eval_data else 'N'
                 explicacion = eval_data.get('explicacion', "Completado.") if eval_data else "Evaluado con éxito."
+                matched_concept = eval_data.get('concepto', 'general') if eval_data else 'general'
                 
-                # Asignar concepto
-                txt = (card.get('front','') + card.get('back','')).lower()
-                matched_concept = next((cp for cp in concepts if cp.lower() in txt), "general")
+                # Asignar concepto obtenido del LLM directamente
                 card['concept'] = matched_concept
                 
                 # Obtener centralidad de PageRank
@@ -292,8 +519,11 @@ class EvaluationUI(tk.Toplevel):
             self.after(0, lambda p=current_progress: self.lbl_status.config(text=p))
             
             prompt = (
-                "Eres un Evaluador Pedagógico Senior de Flashcards de Anki. Evalúa las siguientes tarjetas respecto a su calidad didáctica (0 a 10), "
-                "si son de alto impacto para un examen técnico o práctica real (impacto 'S' para sí, 'N' para no) y provee una explicación muy breve (máximo 15 palabras).\n"
+                "Eres un Evaluador Pedagógico Senior de Flashcards de Anki. Evalúa las siguientes tarjetas respecto a:\n"
+                "1. Calidad didáctica (0 a 10).\n"
+                "2. Si son de alto impacto para un examen técnico o práctica real (impacto 'S' para sí, 'N' para no).\n"
+                "3. El concepto técnico o tema muy específico y atómico al que está anclada la tarjeta (máximo 3 palabras, ej: 'triada CIA', 'cifrado', 'confidencialidad', 'hashing', 'BCDR'; NO uses 'general', 'varios', 'pregunta', ni nombres de sección genéricos).\n"
+                "4. Explicación muy breve (máximo 15 palabras).\n\n"
                 f"Texto de referencia: {text[:1200]}\n\n"
                 "Flashcards a evaluar:\n"
             )
@@ -302,30 +532,86 @@ class EvaluationUI(tk.Toplevel):
                 
             prompt += (
                 "\nResponde ÚNICAMENTE con un arreglo JSON en este formato:\n"
-                '[{"id": 0, "calidad": 8, "impacto": "S", "explicacion": "Explicación corta de la relevancia o fallo"}, ...]\n'
+                '[{"id": 0, "calidad": 8, "impacto": "S", "concepto": "triada CIA", "explicacion": "Explicación corta"}, ...]\n'
                 "No agregues texto introductorio o de cierre fuera del JSON."
             )
             
             try:
-                res = self.generator.generate_raw_response(prompt)
+                res = self.generator.generate_raw_response(prompt, temperature=0.1)
                 match = re.search(r'\[.*\]', res, re.DOTALL)
                 if match:
                     batch_evals = json.loads(match.group())
                     for e in batch_evals:
                         e['original_id'] = batch_idx + e['id']
+                        # Asegurar que concepto no sea vacío o general
+                        concept_val = e.get('concepto', 'general').strip().lower()
+                        if not concept_val or concept_val in ["general", "varios", "pregunta"]:
+                            txt = (batch[e['id']].get('front','') + batch[e['id']].get('back','')).lower()
+                            words = re.findall(r'\b\w{4,}\b', txt)
+                            concept_val = words[0] if words else "general"
+                        e['concepto'] = concept_val
                     all_evals.extend(batch_evals)
                 else:
                     raise ValueError("JSON no encontrado o defectuoso")
             except Exception as e:
                 # Fallback
-                for idx, _ in enumerate(batch):
+                for idx, card in enumerate(batch):
+                    txt = (card.get('front','') + card.get('back','')).lower()
+                    words = re.findall(r'\b\w{4,}\b', txt)
+                    fallback_concept = words[0] if words else "general"
                     all_evals.append({
                         "original_id": batch_idx + idx,
                         "calidad": 7,
                         "impacto": "N",
+                        "concepto": fallback_concept,
                         "explicacion": "Fallo al procesar rúbrica IA."
                     })
         return all_evals
+
+    def _extract_concept_relations_via_llm(self, concepts: List[str], text_ref: str) -> List[Tuple[str, str]]:
+        if len(concepts) <= 1:
+            return []
+            
+        prompt = (
+            "Eres un experto en ingeniería de conocimiento y diseño instruccional.\n"
+            "Dado este conjunto de conceptos atómicos extraídos de un material de estudio:\n"
+            f"Conceptos: {', '.join(concepts)}\n\n"
+            f"Texto de referencia (contexto): {text_ref[:3000]}\n\n"
+            "Genera todas las relaciones de dependencia o jerarquía entre ellos para construir un Grafo de Conocimiento (EduKG).\n"
+            "Para cada par donde el concepto A depende del concepto B para ser comprendido, o A es componente o implementación de B, genera una relación.\n"
+            "Por ejemplo, 'confidencialidad' -> 'triada cia' (Componente de la tríada CIA), 'bcdr' -> 'disponibilidad' (BCDR es implementación para garantizar disponibilidad), 'iam' -> 'confidencialidad' (IAM es mecanismo para garantizar confidencialidad).\n"
+            "Es CRÍTICO que utilices EXACTAMENTE los mismos nombres de conceptos que se te proporcionan en la lista. No uses sinónimos ni alteres su escritura.\n\n"
+            "Responde ÚNICAMENTE con un objeto JSON con el siguiente formato:\n"
+            "{\n"
+            "  \"edges\": [\n"
+            "    {\"from\": \"concepto_A\", \"to\": \"concepto_B\", \"type\": \"TIPO_DE_RELACION\"},\n"
+            "    ...\n"
+            "  ]\n"
+            "}\n"
+            "No agregues explicaciones adicionales, ni bloques de código markdown. Responde solo con el JSON limpio."
+        )
+        
+        edges = []
+        try:
+            res = self.generator.generate_raw_response(prompt, temperature=0.1)
+            # Buscar JSON
+            match = re.search(r'\{.*\}', res, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                raw_edges = data.get('edges', [])
+                valid_concepts = set(c.lower().strip() for c in concepts)
+                for edge in raw_edges:
+                    u = edge.get('from', '').strip().lower()
+                    v = edge.get('to', '').strip().lower()
+                    # Validar que ambos conceptos estén en la lista de nodos
+                    if u and v and u in valid_concepts and v in valid_concepts:
+                        edges.append((u, v))
+            else:
+                print("⚠️ No se pudo encontrar el JSON de relaciones en la respuesta.")
+        except Exception as e:
+            print(f"⚠️ Error al extraer relaciones semánticas vía LLM: {e}")
+            
+        return edges
 
     def _on_evaluation_success(self, metrics):
         self.progress.stop()
@@ -344,6 +630,7 @@ class EvaluationUI(tk.Toplevel):
         self.lbl_total.config(text=f"• Tarjetas evaluadas: {metrics.get('total', 0)}")
         
         self._update_table_view()
+        self._update_concept_filter_dropdown()
         messagebox.showinfo("Evaluación Completada", f"Se han evaluado todas las tarjetas.\nÍndice QYI resultante: {qyi:.2f}")
 
     def _on_evaluation_error(self, err_msg):
@@ -405,6 +692,7 @@ class EvaluationUI(tk.Toplevel):
             
         self._update_table_view()
         self._recompute_qyi_if_evaluated()
+        self._update_concept_filter_dropdown()
 
     def _restore_original(self):
         if not messagebox.askyesno("Confirmar restauración", "¿Restaurar todas las tarjetas al estado inicial sin filtros?"):
@@ -412,6 +700,7 @@ class EvaluationUI(tk.Toplevel):
         self.flat_flashcards = [dict(c) for c in self.original_flat_cards]
         self._update_table_view()
         self._recompute_qyi_if_evaluated()
+        self._update_concept_filter_dropdown()
 
     def _apply_quick_filters(self):
         # Validar si han sido evaluadas
@@ -420,19 +709,50 @@ class EvaluationUI(tk.Toplevel):
             messagebox.showwarning("Requiere evaluación", "Debes presionar 'Iniciar Rúbrica con IA' antes de aplicar filtros.")
             return
             
-        min_qual = int(self.spin_quality.get())
+        try:
+            min_qual = int(self.spin_quality.get())
+        except ValueError:
+            min_qual = 0
+            
+        try:
+            min_util = float(self.spin_utility.get())
+        except ValueError:
+            min_util = 0.0
+            
         only_high = self.check_only_high.get()
+        concept_filter = self.combo_concept_filter.get()
+        search_query = self.entry_search.get().strip().lower()
         
         filtered = []
         discarded_count = 0
         
         for c in self.flat_flashcards:
+            # 1. Filtro de Calidad
             qual_ok = c['_calidad'] >= min_qual
+            
+            # 2. Filtro de Utilidad
+            util_ok = c['_utilidad'] >= min_util
+            
+            # 3. Filtro de Alto Impacto
             impact_ok = True
             if only_high and c['_impacto'] != 'S':
                 impact_ok = False
                 
-            if qual_ok and impact_ok:
+            # 4. Filtro de Concepto
+            concept_ok = True
+            if concept_filter != "Todos" and c.get('concept', '').strip() != concept_filter:
+                concept_ok = False
+                
+            # 5. Filtro de Búsqueda por Texto
+            search_ok = True
+            if search_query:
+                front_text = c.get('front', c.get('text', '')).lower()
+                back_text = c.get('back', '').lower()
+                concept_text = c.get('concept', '').lower()
+                if search_query not in front_text and search_query not in back_text and search_query not in concept_text:
+                    search_ok = False
+            
+            if qual_ok and util_ok and impact_ok and concept_ok and search_ok:
                 filtered.append(c)
             else:
                 discarded_count += 1
@@ -448,6 +768,23 @@ class EvaluationUI(tk.Toplevel):
         self.flat_flashcards = filtered
         self._update_table_view()
         self._recompute_qyi_if_evaluated()
+        self._update_concept_filter_dropdown()
+
+    def _update_concept_filter_dropdown(self):
+        concepts = ["Todos"]
+        for card in self.flat_flashcards:
+            concept = card.get('concept')
+            if concept:
+                concept_clean = concept.strip()
+                if concept_clean and concept_clean not in concepts:
+                    concepts.append(concept_clean)
+                    
+        prev = self.combo_concept_filter.get() if hasattr(self, 'combo_concept_filter') else "Todos"
+        self.combo_concept_filter.config(values=concepts)
+        if prev in concepts:
+            self.combo_concept_filter.set(prev)
+        else:
+            self.combo_concept_filter.set("Todos")
 
     def _recompute_qyi_if_evaluated(self):
         # Recalcular QYI global basado en la lista activa de tarjetas
@@ -503,3 +840,292 @@ class EvaluationUI(tk.Toplevel):
                 
         self.on_complete(updated_imports)
         self.destroy()
+
+    def _transcribe_segments_via_ia(self):
+        """Abre la ventana emergente de progreso de transcripción."""
+        if not self.app:
+            return
+            
+        mode = getattr(self.app, 'current_mode', '')
+        segments = []
+        if mode == "automatic_videos":
+            segments = getattr(self.app, 'current_video_segments', [])
+        elif mode == "automatic_audio":
+            segments = getattr(self.app, 'current_audio_segments', [])
+            
+        if not segments:
+            messagebox.showwarning("Sin segmentos", "No hay segmentos disponibles en la sesión actual.")
+            return
+            
+        # Abrir ventana de progreso
+        TranscriptionProgressUI(self, segments, self.app, self._detect_source_context)
+
+
+class TranscriptionProgressUI(tk.Toplevel):
+    def __init__(self, parent, segments, app, on_complete_callback):
+        super().__init__(parent)
+        self.title("🔊 Transcripción de Segmentos con IA")
+        self.geometry("650x550")
+        self.minsize(550, 450)
+        self.grab_set()  # Ventana modal
+        
+        self.segments = segments
+        self.app = app
+        self.on_complete_callback = on_complete_callback
+        self.is_cancelled = False
+        self.is_running = False
+        
+        self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
+
+    def _build_ui(self):
+        main_frame = ttk.Frame(self, padding=15)
+        main_frame.pack(fill="both", expand=True)
+        
+        # Título
+        self.title_lbl = ttk.Label(main_frame, text="🔊 Transcripción de Segmentos con Gemini", font=("Segoe UI", 12, "bold"))
+        self.title_lbl.pack(anchor="w", pady=(0, 10))
+        
+        # Configuración del prompt
+        prompt_frame = ttk.LabelFrame(main_frame, text="Configuración del Prompt de Transcripción")
+        prompt_frame.pack(fill="x", pady=(0, 10))
+        
+        # Determinar el prompt por defecto según el primer segmento
+        is_audio = False
+        if self.segments:
+            path = self.segments[0].audio_path or ''
+            is_audio = path.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus'))
+            
+        default_prompt = (
+            self.app.video_processor.DEFAULT_SEGMENT_AUDIO_PROMPT 
+            if is_audio else 
+            self.app.video_processor.DEFAULT_SEGMENT_VIDEO_PROMPT
+        )
+        
+        # Selector de Plantillas
+        template_frame = ttk.Frame(prompt_frame)
+        template_frame.pack(fill="x", padx=5, pady=5)
+        
+        ttk.Label(template_frame, text="Plantilla:").pack(side="left", padx=(0, 5))
+        
+        self.prompt_templates = {
+            "Multimodal Completo (Recomendado)": default_prompt,
+            "Literal y Estricto (Sin observaciones)": (
+                "Transcribe fielmente todo el contenido de este segmento. Incluye:\n"
+                "- Todo lo que se dice verbalmente (transcripción literal del audio, sin resumir).\n"
+                "- Todo texto visible en pantalla (diapositivas, código fuente, títulos, subtítulos, anotaciones).\n"
+                "- Descripción muy breve de esquemas o diagramas si aparecen.\n\n"
+                "REGLAS:\n"
+                "- NO resumas ni simplifiques.\n"
+                "- NO agregues observaciones, interpretaciones ni apuntes de estudiante.\n"
+                "- Escribe en español con la mejor ortografía."
+            ),
+            "Solo Audio / Transcripción Literal de Voz": (
+                "Transcribe de forma literal y completa todo el audio del segmento. "
+                "No agregues descripciones visuales ni apuntes de estudiante, solo reproduce el texto hablado "
+                "exactamente como lo dice el ponente, palabra por palabra, sin omitir ni resumir nada."
+            ),
+            "Resumen y Conceptos Clave (Apuntes)": (
+                "Actúa como un estudiante de alto rendimiento. En lugar de una transcripción literal, redacta "
+                "un resumen académico estructurado del segmento. "
+                "Identifica y define los conceptos clave explicados, esquematiza las ideas principales "
+                "y rescata cualquier fórmula, código o paso relevante de manera clara y organizada."
+            )
+        }
+        
+        self.combo_template = ttk.Combobox(
+            template_frame, 
+            values=list(self.prompt_templates.keys()), 
+            state="readonly",
+            width=40
+        )
+        self.combo_template.pack(side="left", fill="x", expand=True)
+        self.combo_template.set("Multimodal Completo (Recomendado)")
+        self.combo_template.bind("<<ComboboxSelected>>", self._on_template_selected)
+        
+        self.prompt_text = tk.Text(prompt_frame, height=5, font=("Segoe UI", 9), wrap="word")
+        self.prompt_text.pack(fill="x", padx=5, pady=5)
+        self.prompt_text.insert("1.0", default_prompt)
+        
+        # Checkbox para forzar re-transcripción
+        self.check_force = tk.BooleanVar(value=False)
+        self.chk_force = ttk.Checkbutton(prompt_frame, text="Reemplazar transcripciones existentes (Forzar re-generación)", variable=self.check_force)
+        self.chk_force.pack(anchor="w", padx=5, pady=(0, 5))
+        
+        # Barra de progreso
+        self.progress = ttk.Progressbar(main_frame, mode="determinate")
+        self.progress.pack(fill="x", pady=5)
+        
+        # Log de logs/estado
+        log_frame = ttk.LabelFrame(main_frame, text="Detalle del Proceso")
+        log_frame.pack(fill="both", expand=True, pady=10)
+        
+        self.log_text = tk.Text(log_frame, font=("Courier New", 9), wrap="word", bg="#f9f9f9", height=8)
+        self.log_text.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        
+        scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y", pady=5)
+        
+        # Escribir instrucción inicial en el log
+        self._write_log("ℹ️ Revisa o edita el prompt de arriba según tus necesidades, luego presiona '▶️ Iniciar Transcripción'.")
+        
+        # Botones
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill="x", pady=(5, 0))
+        
+        self.btn_cancel = ttk.Button(btn_frame, text="❌ Cerrar", command=self._close_window)
+        self.btn_cancel.pack(side="right", padx=(5, 0))
+        
+        self.btn_start = ttk.Button(btn_frame, text="▶️ Iniciar Transcripción", command=self._start_process)
+        self.btn_start.pack(side="right")
+
+    def _on_template_selected(self, event=None):
+        selected = self.combo_template.get()
+        prompt_content = self.prompt_templates.get(selected, "")
+        self.prompt_text.config(state="normal")
+        self.prompt_text.delete("1.0", "end")
+        self.prompt_text.insert("1.0", prompt_content)
+        if self.is_running:
+            self.prompt_text.config(state="disabled")
+
+    def _start_process(self):
+        self.is_running = True
+        self.is_cancelled = False
+        self.custom_prompt = self.prompt_text.get("1.0", "end-1c").strip()
+        self.btn_start.config(state="disabled")
+        self.chk_force.config(state="disabled")
+        self.combo_template.config(state="disabled")
+        self.prompt_text.config(state="disabled", bg="#f0f0f0") # deshabilitar edición
+        self.title_lbl.config(text="🔊 Transcribiendo segmentos con Gemini...")
+        self.btn_cancel.config(text="❌ Cancelar", command=self._cancel)
+        self.log_text.delete("1.0", "end") # limpiar el log inicial
+        self._start_transcription()
+
+    def _start_transcription(self):
+        threading.Thread(target=self._run_transcription_thread, daemon=True).start()
+        
+    def _cancel(self):
+        self.is_cancelled = True
+        self.log("⚠️ Cancelación solicitada. Esperando a que termine el segmento actual...")
+        self.btn_cancel.config(state="disabled")
+        
+    def _close_window(self):
+        if self.is_running and not self.is_cancelled:
+            self._cancel()
+        else:
+            self.destroy()
+
+    def _on_window_close(self):
+        self._close_window()
+
+    def log(self, msg):
+        self.after(0, lambda: self._write_log(msg))
+        
+    def _write_log(self, msg):
+        self.log_text.insert("end", f"{msg}\n")
+        self.log_text.see("end")
+
+    def _run_transcription_thread(self):
+        try:
+            total = len(self.segments)
+            self.log(f"📋 Iniciando transcripción de {total} segmentos...")
+            
+            # Obtener carpeta de guardado de chunks
+            session_dir = None
+            mode = getattr(self.app, 'current_mode', '')
+            if mode == "automatic_videos":
+                session_dir = getattr(self.app, 'current_video_session', None)
+            elif mode == "automatic_audio":
+                session_dir = getattr(self.app, 'current_audio_session', None)
+                
+            if not session_dir:
+                self.log("❌ Error: No se pudo identificar la carpeta de la sesión actual.")
+                return
+                
+            chunks_dir = os.path.join(session_dir, "chunks")
+            os.makedirs(chunks_dir, exist_ok=True)
+            
+            transcribed_count = 0
+            
+            for idx, segment in enumerate(self.segments, 1):
+                if self.is_cancelled:
+                    self.log("🛑 Transcripción cancelada por el usuario.")
+                    break
+                    
+                self.after(0, lambda i=idx: self.progress.config(value=(i-1)/total * 100))
+                self.log(f"\n⚡ [{idx}/{total}] Procesando Segmento {segment.segment_id}...")
+                
+                # Verificar si ya tiene transcripción en memoria o en disco
+                chunk_file = os.path.join(chunks_dir, f"segment_{segment.segment_id:03d}.txt")
+                force_overwrite = self.check_force.get()
+                if not force_overwrite:
+                    if os.path.exists(chunk_file) and not getattr(segment, 'transcription_text', ''):
+                        try:
+                            with open(chunk_file, 'r', encoding='utf-8') as f:
+                                text = f.read().strip()
+                                if text:
+                                    segment.transcription_text = text
+                                    segment.char_count = len(text)
+                                    segment.transcription_path = chunk_file
+                                    self.log(f"   ✓ Transcripción recuperada desde disco ({len(text)} chars)")
+                                    transcribed_count += 1
+                                    continue
+                        except Exception:
+                            pass
+                    
+                    if getattr(segment, 'transcription_text', ''):
+                        self.log(f"   ✓ Ya transcrito en memoria ({len(segment.transcription_text)} chars)")
+                        transcribed_count += 1
+                        continue
+                
+                # Transcribir con Gemini a través del video_processor
+                if not segment.audio_path or not os.path.exists(segment.audio_path):
+                    # Intentar buscar el archivo en la subcarpeta video_chunks/audio_chunks
+                    rel_audio = f"segment_{segment.segment_id:03d}.mp4"
+                    audio_path = os.path.join(session_dir, "video_chunks", rel_audio)
+                    if os.path.exists(audio_path):
+                        segment.audio_path = audio_path
+                    else:
+                        rel_audio_wav = f"segment_{segment.segment_id:03d}.wav"
+                        audio_path_wav = os.path.join(session_dir, "audio_chunks", rel_audio_wav)
+                        if os.path.exists(audio_path_wav):
+                            segment.audio_path = audio_path_wav
+                
+                if not segment.audio_path or not os.path.exists(segment.audio_path):
+                    self.log(f"   ❌ Error: No se encontró archivo multimedia en {segment.audio_path or 'chunks/'}")
+                    continue
+                
+                self.log(f"   ⬆ Subiendo segmento a Gemini para análisis de audio...")
+                
+                try:
+                    text = self.app.video_processor.transcribe_video_segment(
+                        segment,
+                        custom_prompt=getattr(self, 'custom_prompt', None)
+                    )
+                    if text:
+                        text = text.strip()
+                        segment.transcription_text = text
+                        segment.char_count = len(text)
+                        segment.transcription_path = chunk_file
+                        
+                        # Guardar incrementalmente en disco
+                        with open(chunk_file, 'w', encoding='utf-8') as f:
+                            f.write(text)
+                            
+                        self.log(f"   ✅ Éxito: {len(text):,} caracteres transcritos.")
+                        transcribed_count += 1
+                    else:
+                        self.log(f"   ❌ Error: Gemini retornó transcripción vacía.")
+                except Exception as ex:
+                    self.log(f"   ❌ Error en transcripción: {ex}")
+            
+            self.after(0, lambda: self.progress.config(value=100))
+            if not self.is_cancelled:
+                self.log(f"\n🎉 PROCESO FINALIZADO. Se transcribieron {transcribed_count} de {total} segmentos.")
+                messagebox.showinfo("Proceso Terminado", f"Se han transcrito {transcribed_count} segmentos correctamente con la IA.")
+            
+            self.after(0, self.on_complete_callback)
+            
+        except Exception as e:
+            self.log(f"❌ Error inesperado en el hilo de transcripción: {e}")

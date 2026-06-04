@@ -621,7 +621,8 @@ class VideoProcessor:
         segment: VideoSegment,
         language: str = "es",
         pre_uploaded_file=None,
-        skip_cleanup: bool = False
+        skip_cleanup: bool = False,
+        custom_prompt: Optional[str] = None
     ) -> str:
         """
         Transcribe un segmento de video completo usando Gemini Multimodal.
@@ -631,6 +632,7 @@ class VideoProcessor:
             language: Código de idioma (Omitido para Gemini, que detecta automático)
             pre_uploaded_file: Objeto de archivo de Gemini si ya se subió y procesó previamente
             skip_cleanup: Si es True, no elimina el archivo de la API después de transcribir
+            custom_prompt: Prompt personalizado opcional para la transcripción
             
         Returns:
             Texto de la transcripción
@@ -657,37 +659,15 @@ class VideoProcessor:
                     self._log(f"   ❌ Falla en servidor de Gemini.")
                     return ""
             
-            # Determinar si es audio o video para el prompt
-            is_audio = segment.audio_path.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus'))
-            
-            if is_audio:
-                prompt = (
-                    "Actúa como un excelente estudiante universitario especializado, elaborando "
-                    "material de estudio integral basado en el contenido de AUDIO proporcionado. "
-                    "Tu instrucción ESTRICTA es integrar y consolidar paso a paso todo el conocimiento verbal, "
-                    "explicaciones exactas, ejemplos mencionados y matices del ponente. "
-                    "Debes añadir observaciones y apuntes complementarios como un estudiante brillante resaltando "
-                    "lo relevante del contenido, todo con la mejor ortografía y puntuación posibles en español. "
-                    "ESTÁ ESTRICTAMENTE PROHIBIDO SIMPLIFICAR O RESUMIR; no debes perder información sin importar "
-                    "qué tan largo sea. Debes recuperar hasta el último detalle técnico válido mencionado. "
-                    "ADICIONALMENTE: Si se dictan fragmentos de CÓDIGO o ESPECIFICACIONES TÉCNICAS, debes recrearlos "
-                    "ÍNTEGRAMENTE. Si es una REUNIÓN o ENTREVISTA, identifica claramente participantes, acuerdos y decisiones."
-                )
+            # Determinar prompt
+            if custom_prompt:
+                prompt = custom_prompt
             else:
-                prompt = (
-                    "Actúa como un excelente estudiante universitario especializado, elaborando "
-                    "material de estudio integral basado en el contenido audiovisual proporcionado. "
-                    "Recibes la imagen del video de manera sincronizada con la voz. "
-                    "Tu instrucción ESTRICTA es integrar y consolidar paso a paso todo el conocimiento visual "
-                    "(diapositivas, esquemas, ejemplos en pantalla) que aparezca a lo largo del tiempo, "
-                    "en conjunto cronológico con las explicaciones verbales exactas del ponente. "
-                    "Debes añadir observaciones y apuntes complementarios como estudiante resaltando "
-                    "lo relevante del contenido, todo con la mejor ortografía y puntuación posibles en español. "
-                    "ESTÁ ESTRICTAMENTE PROHIBIDO SIMPLIFICAR O RESUMIR; no debes perder información sin importar "
-                    "qué tan largo sea. Debes recuperar hasta el último detalle técnico válido mostrado o dicho. "
-                    "ADICIONALMENTE: Si detectas fragmentos de CÓDIGO o ESPECIFICACIONES TÉCNICAS, debes recrearlos "
-                    "ÍNTEGRAMENTE sin modificar ni una sola línea de sintaxis. Si es una REUNIÓN, identifica participantes y acuerdos."
-                )
+                is_audio = segment.audio_path.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus'))
+                if is_audio:
+                    prompt = self.DEFAULT_SEGMENT_AUDIO_PROMPT
+                else:
+                    prompt = self.DEFAULT_SEGMENT_VIDEO_PROMPT
             
             self._log(f"   🧠 Generando transcripción multimodal...")
             transcription_text = self._generate_with_fallback(myfile, prompt)
@@ -1074,6 +1054,35 @@ class VideoProcessor:
     # =========================================================================
     # TRANSCRIPCIÓN FIEL PARA FUENTE DE CONSULTA
     # =========================================================================
+
+    DEFAULT_SEGMENT_AUDIO_PROMPT = (
+        "Actúa como un excelente estudiante universitario especializado, elaborando "
+        "material de estudio integral basado en el contenido de AUDIO proporcionado. "
+        "Tu instrucción ESTRICTA es integrar y consolidar paso a paso todo el conocimiento verbal, "
+        "explicaciones exactas, ejemplos mencionados y matices del ponente. "
+        "Debes añadir observaciones y apuntes complementarios como un estudiante brillante resaltando "
+        "lo relevante del contenido, todo con la mejor ortografía y puntuación posibles en español. "
+        "ESTÁ ESTRICTAMENTE PROHIBIDO SIMPLIFICAR O RESUMIR; no debes perder información sin importar "
+        "qué tan largo sea. Debes recuperar hasta el último detalle técnico válido mencionado. "
+        "ADICIONALMENTE: Si se dictan fragmentos de CÓDIGO o ESPECIFICACIONES TÉCNICAS, debes recrearlos "
+        "ÍNTEGRAMENTE. Si es una REUNIÓN o ENTREVISTA, identifica claramente participantes, acuerdos y decisiones."
+    )
+
+    DEFAULT_SEGMENT_VIDEO_PROMPT = (
+        "Actúa como un excelente estudiante universitario especializado, elaborando "
+        "material de estudio integral basado en el contenido audiovisual proporcionado.\n"
+        "Recibes la imagen del video de manera sincronizada con la voz. Tu instrucción ESTRICTA "
+        "es integrar y consolidar paso a paso todo el conocimiento visual y verbal del segmento.\n\n"
+        "INSTRUCCIONES DE TRANSCRIPCIÓN MULTIMODAL:\n"
+        "1. TRANSCRIPCIÓN DE AUDIO: Recupera todo el contenido dicho verbalmente por el ponente, "
+        "explicaciones exactas, ejemplos y detalles técnicos. Está estrictamente prohibido resumir o simplificar.\n"
+        "2. EXTRACCIÓN DE TEXTO VISUAL (OCR): Transcribe fielmente todo texto relevante que aparezca en pantalla "
+        "(diapositivas, títulos, términos clave, URLs, fragmentos de código, fórmulas matemáticas o ecuaciones).\n"
+        "3. DESCRIPCIÓN DE ELEMENTOS GRÁFICOS: Describe detalladamente esquemas, diagramas, diagramas de flujo, "
+        "gráficos, tablas de datos o imágenes relevantes en pantalla, explicando qué conceptos o relaciones representan.\n"
+        "4. CÓDIGO Y ESPECIFICACIONES: Si en pantalla aparece código fuente o comandos, recréalos íntegramente en bloques de código markdown.\n\n"
+        "ESTÁ ESTRICTAMENTE PROHIBIDO RESUMIR O SIMPLIFICAR; mantén la secuencia cronológica y detalla cada elemento visual clave para que el material resultante sirva de fuente fáctica 100% fiel."
+    )
 
     # Prompt de transcripción fiel para VIDEO (multimodal: audio + visual)
     FAITHFUL_VIDEO_PROMPT = (

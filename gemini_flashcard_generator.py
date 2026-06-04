@@ -8,7 +8,7 @@ import threading
 import time
 import json
 import re
-from typing import List, Dict, Any, Callable, Optional
+from typing import List, Dict, Any, Callable, Optional, Tuple
 from datetime import datetime
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -96,7 +96,7 @@ class GeminiFlashcardGenerator:
     def _is_content_sufficient(self, text: str) -> bool:
         return len(text.strip()) >= MIN_CONTENT_CHARS
 
-    def generate_raw_response(self, prompt: str, api_index: int = 1, files: List[Any] = None) -> str:
+    def generate_raw_response(self, prompt: str, api_index: int = 1, files: List[Any] = None, temperature: Optional[float] = None) -> str:
         """
         Llamada robusta a Gemini con failover automático entre modelos y llaves.
         Ignora api_index en favor del pool global secuencial.
@@ -123,7 +123,11 @@ class GeminiFlashcardGenerator:
                     content = [prompt]
                     if files: content.extend(files)
                     
-                    response = model.generate_content(content)
+                    config_dict = {}
+                    if temperature is not None:
+                        config_dict["temperature"] = temperature
+                        
+                    response = model.generate_content(content, generation_config=config_dict if config_dict else None)
                     return response.text
                 except Exception as e:
                     err_msg = str(e)
@@ -142,7 +146,7 @@ class GeminiFlashcardGenerator:
     def extract_concepts(self, text: str) -> List[str]:
         prompt = f"Extrae los 15 conceptos técnicos clave de este texto (solo nombres separados por comas):\n{text[:4000]}"
         try:
-            res = self.generate_raw_response(prompt)
+            res = self.generate_raw_response(prompt, temperature=0.1)
             return [c.strip() for c in res.split(",") if c.strip()]
         except: return []
 
@@ -151,7 +155,8 @@ class GeminiFlashcardGenerator:
         self._log("\n🧪 EVALUACIÓN QYI...")
         
         concepts = self.extract_concepts(source_text)
-        self.kg_ranker.build_graph(concepts, source_text)
+        edges = self._extract_concept_relations_via_llm(concepts, source_text)
+        self.kg_ranker.build_graph(concepts, source_text, edges=edges)
         pagerank = self.kg_ranker.calculate_pagerank()
         
         evals = self._watchdog_evaluate(source_text, flashcards)
@@ -168,13 +173,56 @@ class GeminiFlashcardGenerator:
         self._log(f"✅ QYI: {metrics['qyi']:.2f} | Φ_Q: {metrics['phi_q']:.2f} | Φ_Y: {metrics['phi_y']:.2f} | Φ_C: {metrics['phi_c']:.2f}")
         return metrics
 
+    def _extract_concept_relations_via_llm(self, concepts: List[str], text_ref: str) -> List[Tuple[str, str]]:
+        if len(concepts) <= 1:
+            return []
+            
+        prompt = (
+            "Eres un experto en ingeniería de conocimiento y diseño instruccional.\n"
+            "Dado este conjunto de conceptos atómicos extraídos de un material de estudio:\n"
+            f"Conceptos: {', '.join(concepts)}\n\n"
+            f"Texto de referencia (contexto): {text_ref[:3000]}\n\n"
+            "Genera todas las relaciones de dependencia o jerarquía entre ellos para construir un Grafo de Conocimiento (EduKG).\n"
+            "Para cada par donde el concepto A depende del concepto B para ser comprendido, o A es componente o implementación de B, genera una relación.\n"
+            "Por ejemplo, 'confidencialidad' -> 'triada cia' (Componente de la tríada CIA), 'bcdr' -> 'disponibilidad' (BCDR es implementación para garantizar disponibilidad), 'iam' -> 'confidencialidad' (IAM es mecanismo para garantizar confidencialidad).\n"
+            "Es CRÍTICO que utilices EXACTAMENTE los mismos nombres de conceptos que se te proporcionan en la lista. No uses sinónimos ni alteres su escritura.\n\n"
+            "Responde ÚNICAMENTE con un objeto JSON con el siguiente formato:\n"
+            "{\n"
+            "  \"edges\": [\n"
+            "    {\"from\": \"concepto_A\", \"to\": \"concepto_B\", \"type\": \"TIPO_DE_RELACION\"},\n"
+            "    ...\n"
+            "  ]\n"
+            "}\n"
+            "No agregues explicaciones adicionales, ni bloques de código markdown. Responde solo con el JSON limpio."
+        )
+        
+        edges = []
+        try:
+            res = self.generate_raw_response(prompt, temperature=0.1)
+            match = re.search(r'\{.*\}', res, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                raw_edges = data.get('edges', [])
+                valid_concepts = set(c.lower().strip() for c in concepts)
+                for edge in raw_edges:
+                    u = edge.get('from', '').strip().lower()
+                    v = edge.get('to', '').strip().lower()
+                    if u and v and u in valid_concepts and v in valid_concepts:
+                        edges.append((u, v))
+            else:
+                self._log("⚠️ No se pudo encontrar el JSON de relaciones en la respuesta.")
+        except Exception as e:
+            self._log(f"⚠️ Error al extraer relaciones semánticas vía LLM: {e}")
+            
+        return edges
+
     def _watchdog_evaluate(self, text: str, cards: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         prompt = f"Evalúa estas flashcards (Calidad 0-10, Impacto S/N). Texto ref: {text[:1000]}\nCards:\n"
         for i, c in enumerate(cards):
             prompt += f"ID:{i} P:{c.get('front', c.get('P',''))[:100]}\n"
         prompt += "\nResponde JSON: [{\"id\":0, \"calidad\":8, \"impacto\":\"S\"}, ...]"
         try:
-            res = self.generate_raw_response(prompt)
+            res = self.generate_raw_response(prompt, temperature=0.1)
             match = re.search(r'\[.*\]', res, re.DOTALL)
             return json.loads(match.group()) if match else []
         except: return []
@@ -280,8 +328,8 @@ class GeminiFlashcardGenerator:
                 all_cards.extend(cards)
                 final_res[t] = {"success": True, "flashcards": cards}
 
-        self.run_qyi_evaluation(text, all_cards)
-        return {"success": True, "results": final_res, "qyi_metrics": self.last_evaluation_metrics}
+        # self.run_qyi_evaluation(text, all_cards)
+        return {"success": True, "results": final_res, "qyi_metrics": getattr(self, 'last_evaluation_metrics', {})}
 
     def process_video_section(self, section_title: str, transcription_paths: List[str], 
                             converter, anki_manager, deck_prefix: str,
@@ -396,9 +444,9 @@ class GeminiFlashcardGenerator:
                 # Cleanup
                 for f in uploaded_files: f.delete()
 
-                # QYI
-                self.run_qyi_evaluation(f"Multimodal Video Context: {section_title}", all_cards_for_qyi)
-                final_results["qyi_metrics"] = self.last_evaluation_metrics
+                # QYI (desactivado en medio de la generación para evitar bloqueos)
+                # self.run_qyi_evaluation(f"Multimodal Video Context: {section_title}", all_cards_for_qyi)
+                final_results["qyi_metrics"] = getattr(self, 'last_evaluation_metrics', {})
 
                 return final_results
             except Exception as e:
@@ -482,8 +530,8 @@ class GeminiFlashcardGenerator:
                     self._log(f"❌ Error al generar tipo '{t}': {e}")
                     results[t] = {"success": False, "error": str(e)}
 
-        if all_cards_for_qyi:
-            self.run_qyi_evaluation(text, all_cards_for_qyi)
+        # if all_cards_for_qyi:
+        #     self.run_qyi_evaluation(text, all_cards_for_qyi)
 
         return results
 
