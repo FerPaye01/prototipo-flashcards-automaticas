@@ -479,6 +479,7 @@ class GeminiFlashcardGenerator:
                     cards = self._parse_tsv(res) # Intento de parseo rápido
                     all_cards_for_qyi.extend(cards)
                 except Exception as e:
+                    self._log(f"❌ Error al generar tipo '{t}': {e}")
                     results[t] = {"success": False, "error": str(e)}
 
         if all_cards_for_qyi:
@@ -501,10 +502,121 @@ class GeminiFlashcardGenerator:
         self.config_set = config
         self.active_types = config.get("active_types", self.active_types)
         # El pool de modelos ahora es dinámico desde el entorno
+    def check_api_connection(self, api_index: int = 1) -> bool:
+        """Verifica la conexión con una API de Gemini utilizando la pool de llaves."""
+        label = f"API {api_index}"
+        try:
+            if not self.api_keys:
+                self._log("❌ No se encontraron llaves API en la pool")
+                return False
+            
+            idx = api_index - 1
+            if idx < len(self.api_keys):
+                key = self.api_keys[idx]
+            else:
+                key = self.api_keys[0]
+                label = f"API {api_index} (Reutilizando principal)"
+            
+            genai.configure(api_key=key)
+            models = list(genai.list_models())
+            self._log(f"✅ {label} conectada correctamente")
+            return True
+        except Exception as e:
+            self._log(f"❌ {label} falló: {e}")
+            return False
+
     def check_all_apis(self) -> Dict[str, bool]:
+        """Verifica todas las APIs (1 a 4)."""
         status = {}
         for i in range(1, 5):
-            keys = self.api_keys.get(i, [])
-            status[f"API {i}"] = len(keys) > 0
-        status["OCR API"] = len(self.ocr_api_keys) > 0
+            status[f"API {i}"] = self.check_api_connection(i)
         return status
+
+    def extract_text_from_pdf_file(self, pdf_path: str, extraction_mode: int = 1) -> str:
+        """Extrae texto de un archivo PDF usando PyMuPDF o Vision OCR."""
+        self._log(f"📄 Extrayendo texto de PDF: {os.path.basename(pdf_path)} (Modo {extraction_mode})...")
+        try:
+            import fitz
+            doc = fitz.open(pdf_path)
+            text_list = []
+            for page in doc:
+                text_list.append(page.get_text())
+            doc.close()
+            full_text = "\n".join(text_list).strip()
+            
+            # Si el texto es muy corto o modo es 2, intentamos usar OCR multimodal de Gemini
+            if len(full_text) < 100 or extraction_mode == 2:
+                self._log("⚠️ Poco texto o modo estructurado. Renderizando páginas a imágenes para OCR...")
+                import tempfile
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    doc = fitz.open(pdf_path)
+                    image_paths = []
+                    for page_num in range(len(doc)):
+                        page = doc.load_page(page_num)
+                        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                        img_path = os.path.join(tmpdir, f"page_{page_num}.png")
+                        pix.save(img_path)
+                        image_paths.append(img_path)
+                    doc.close()
+                    full_text = self.extract_text_from_images(image_paths)
+            
+            return full_text
+        except Exception as e:
+            self._log(f"❌ Error al extraer texto del PDF: {e}")
+            return ""
+
+    def structure_content_expert(self, text: str) -> str:
+        """Optimiza y estructura el texto en apuntes de estudio exhaustivos."""
+        self._log("✨ Optimizando apuntes expertos con Gemini...")
+        prompt = (
+            "Actúa como un profesor y estudiante brillante. Toma el siguiente texto de estudio y "
+            "estructúralo en apuntes Markdown limpios, legibles, completos y exhaustivos. "
+            "No resumas de forma destructiva; conserva todos los detalles técnicos, definiciones, "
+            "fórmulas, código y tablas. Devuelve solo el Markdown estructurado.\n\n"
+            f"TEXTO A ESTRUCTURAR:\n{text}"
+        )
+        try:
+            return self.generate_raw_response(prompt)
+        except Exception as e:
+            self._log(f"❌ Error estructurando apuntes expertos: {e}")
+            return text
+
+    def analyze_book_semantic_sections(self, text_with_markers: str, total_pages: int) -> List[Dict[str, Any]]:
+        """Identifica rangos semánticos (capítulos o temas) en un libro usando Gemini."""
+        self._log("🧠 Analizando estructura semántica del libro con Gemini...")
+        prompt = (
+            "Analiza el siguiente texto de un libro que contiene marcadores de página (por ejemplo, '--- PÁGINA X ---'). "
+            "Tu tarea es identificar las secciones o capítulos principales del libro y devolverlos en un formato JSON estructurado. "
+            "Para cada sección, debes proporcionar un título descriptivo ('title') y el rango de páginas correspondiente: "
+            "el número de página de inicio ('start_page', entero) y el número de página de fin ('end_page', entero). "
+            "Asegúrate de cubrir todo el rango del libro desde la página 1 hasta la página final. "
+            "No agregues texto explicativo, responde ÚNICAMENTE con una lista JSON válida de objetos con el formato:\n"
+            '[{"title": "Nombre de la Sección", "start_page": 1, "end_page": 10}, ...]\n\n'
+            f"TOTAL PÁGINAS: {total_pages}\n\n"
+            f"TEXTO CON MARCADORES (Muestra):\n{text_with_markers[:8000]}"
+        )
+        try:
+            res = self.generate_raw_response(prompt)
+            match = re.search(r'\[.*\]', res, re.DOTALL)
+            if match:
+                sections = json.loads(match.group())
+                for sec in sections:
+                    start = sec.get("start_page", 1)
+                    end = sec.get("end_page", start)
+                    sec["pages"] = list(range(start, end + 1))
+                return sections
+        except Exception as e:
+            self._log(f"❌ Error analizando secciones semánticas: {e}")
+        return []
+
+    def generate_all_flashcards_multimodal(self, pdf_segment_path: str) -> Dict[str, Any]:
+        """Genera flashcards directamente a partir de un fragmento de PDF."""
+        self._log(f"🎬 Generando flashcards multimodales directas de PDF: {os.path.basename(pdf_segment_path)}")
+        try:
+            text = self.extract_text_from_pdf_file(pdf_segment_path, extraction_mode=2)
+            if not text:
+                return {"success": False, "error": "No se pudo extraer texto del PDF para generación"}
+            return self.generate_all_flashcards_parallel(text)
+        except Exception as e:
+            self._log(f"❌ Error en generación multimodal de PDF: {e}")
+            return {}

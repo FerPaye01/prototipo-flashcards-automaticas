@@ -31,6 +31,7 @@ from gemini_flashcard_generator import GeminiFlashcardGenerator
 from models_manager import ModelResourceManager
 from chunking_engine import ChunkingEngineFactory
 from deduplication_window import DeduplicationUI
+from evaluation_window import EvaluationUI
 
 
 # Carpeta maestra para archivos generados
@@ -652,6 +653,7 @@ class AnkiImportInterface:
                                                command=self.process_all_sections_auto)
         self.process_sections_btn.pack(side="left", padx=5)
         ttk.Button(row2, text="🧠 Filtrar Interferencia (IA)", command=self.open_deduplication_window).pack(side="left", padx=5)
+        ttk.Button(row2, text="🎓 Rúbrica Pedagógica (IA)", command=self.open_evaluation_window).pack(side="left", padx=5)
         ttk.Button(row2, text="✅ Ejecutar Sincronización", command=self.execute_deduplicated_import).pack(side="left", padx=5)
         
         recover_btn = ttk.Button(row2, text="📂 Recuperar Sesión",
@@ -773,6 +775,7 @@ class AnkiImportInterface:
                                                     command=self.process_all_text_sections)
         self.process_text_sections_btn.pack(side="left", padx=5)
         ttk.Button(trow2, text="🧠 Filtrar Interferencia (IA)", command=self.open_deduplication_window).pack(side="left", padx=5)
+        ttk.Button(trow2, text="🎓 Rúbrica Pedagógica (IA)", command=self.open_evaluation_window).pack(side="left", padx=5)
         ttk.Button(trow2, text="✅ Ejecutar Sincronización", command=self.execute_deduplicated_import).pack(side="left", padx=5)
         
         # Botón Importar Pendientes
@@ -940,6 +943,7 @@ class AnkiImportInterface:
                                                     command=self.process_all_book_sections)
         self.process_book_sections_btn.pack(side="left", padx=5)
         ttk.Button(brow2, text="🧠 Filtrar Interferencia (IA)", command=self.open_deduplication_window).pack(side="left", padx=5)
+        ttk.Button(brow2, text="🎓 Rúbrica Pedagógica (IA)", command=self.open_evaluation_window).pack(side="left", padx=5)
         ttk.Button(brow2, text="✅ Ejecutar Sincronización", command=self.execute_deduplicated_import).pack(side="left", padx=5)
         
         ttk.Button(brow2, text="📋 Importar Pendientes", 
@@ -1422,6 +1426,27 @@ class AnkiImportInterface:
         
         return "::".join(parts) if parts else "Libros_Importados"
 
+    def _get_deck_with_type_label(self, base_deck: str, card_type: str) -> str:
+        """Construye la ruta del mazo agregando el nombre amigable del tipo de tarjeta."""
+        type_labels = {
+            "basic": "Basic",
+            "multiple_choice": "Multiple Choice", 
+            "cloze": "Cloze",
+            "vocabulary": "Vocabulary",
+            "level_1_cloze": "Nivel 1 - Cloze",
+            "level_2_relations": "Nivel 2 - Relaciones",
+            "level_3_application": "Nivel 3 - Aplicación",
+            "level_4_analysis": "Nivel 4 - Análisis",
+            "atomic_extraction": "Extracción Atómica",
+            "high_performance_architect": "Alto Rendimiento",
+            "exam_pareto": "Examen Pareto",
+            "exam_faithful": "Examen Fiel"
+        }
+        label = type_labels.get(card_type, card_type)
+        if base_deck.endswith(f"::{label}"):
+            return base_deck
+        return f"{base_deck}::{label}"
+
     def _generate_cards_for_book_section_logic(self, section: ImageSection):
         """Lógica de generación para una sección de libro (Síncrona)."""
         if not section.images and not hasattr(section, 'text'):
@@ -1585,6 +1610,9 @@ class AnkiImportInterface:
                             self.root.after(0, lambda t=card_type: widgets["status_labels"][t]["state"].config(text="✅", foreground="green"))
                     else:
                         self.book_log(f"   ⚠️ Error importando {card_type}: {msg}")
+                else:
+                    err_msg = result.get("error", "Error desconocido")
+                    self.book_log(f"   ❌ Error al generar tipo '{card_type}': {err_msg}")
 
             self.book_log(f"✅ Sección {section.title} lista: {count} flashcards importadas.")
         except Exception as e:
@@ -1885,6 +1913,7 @@ class AnkiImportInterface:
                                                     state="disabled")
         self.process_audio_sections_btn.pack(side="left", padx=5)
         ttk.Button(bottom_frame, text="🧠 Filtrar Interferencia (IA)", command=self.open_deduplication_window).pack(side="left", padx=5)
+        ttk.Button(bottom_frame, text="🎓 Rúbrica Pedagógica (IA)", command=self.open_evaluation_window).pack(side="left", padx=5)
         ttk.Button(bottom_frame, text="✅ Ejecutar Sincronización", command=self.execute_deduplicated_import).pack(side="left", padx=5)
         
         self.clear_audio_btn = ttk.Button(bottom_frame, text="🗑 Limpiar Todo", command=self.clear_audio_mode)
@@ -2198,6 +2227,7 @@ class AnkiImportInterface:
                                               state="disabled")
         self.process_sections_btn.pack(side="left", padx=5)
         ttk.Button(bottom_frame, text="🧠 Filtrar Interferencia (IA)", command=self.open_deduplication_window).pack(side="left", padx=5)
+        ttk.Button(bottom_frame, text="🎓 Rúbrica Pedagógica (IA)", command=self.open_evaluation_window).pack(side="left", padx=5)
         ttk.Button(bottom_frame, text="✅ Ejecutar Sincronización", command=self.execute_deduplicated_import).pack(side="left", padx=5)
         
         self.clear_video_btn = ttk.Button(bottom_frame, text="🗑 Limpiar Todo",
@@ -2997,9 +3027,10 @@ class AnkiImportInterface:
 
     def _show_processing_summary(self, results: list):
         """Muestra resumen del procesamiento, llena sala de espera y actualiza indicadores."""
-        self.auto_log("\n" + "="*60)
-        self.auto_log("📊 RESUMEN FINAL DE PROCESAMIENTO")
-        self.auto_log("="*60)
+        log_func = self._mode_log
+        log_func("\n" + "="*60)
+        log_func("📊 RESUMEN FINAL DE PROCESAMIENTO")
+        log_func("="*60)
         
         total_generated = 0
         successful_sections = 0
@@ -3007,15 +3038,15 @@ class AnkiImportInterface:
         for result in results:
             section_title = result.get("section", "Unknown")
             if not result.get("success"):
-                self.auto_log(f"\n❌ {section_title}: ERROR")
+                log_func(f"\n❌ {section_title}: ERROR")
                 continue
                 
             successful_sections += 1
-            self.auto_log(f"\n📁 {section_title}:")
+            log_func(f"\n📁 {section_title}:")
             
             # Mostrar métricas QYI
             if "qyi_metrics" in result:
-                self._log_qyi_metrics(result["qyi_metrics"], self.auto_log)
+                self._log_qyi_metrics(result["qyi_metrics"], log_func)
             
             # Procesar cada tipo de tarjeta
             section_results = result.get("results", {})
@@ -3024,33 +3055,35 @@ class AnkiImportInterface:
                     flashcards = res.get("flashcards", [])
                     count = len(flashcards)
                     deck = res.get("deck", "Default")
+                    deck_path = self._get_deck_with_type_label(deck, card_type)
                     
                     if count > 0:
                         # AGREGAR A SALA DE ESPERA (No automático)
                         self.pending_flashcard_imports.append({
-                            "deck_name": deck,
+                            "deck_name": deck_path,
                             "card_type": card_type,
                             "flashcards": flashcards
                         })
                         total_generated += count
-                        self.auto_log(f"   ✅ {card_type}: {count} cards generadas")
+                        log_func(f"   ✅ {card_type}: {count} cards generadas")
                     
                     # Actualizar UI (bolitas de estado)
                     # Necesitamos encontrar el ID de la sección por su título
-                    for sid, sdata in self.image_sections.items():
+                    for sdata in self.sections:
                         if sdata.title == section_title:
-                            self.root.after(0, lambda i=sid, t=card_type, c=count: 
+                            self.root.after(0, lambda i=sdata.section_id, t=card_type, c=count: 
                                           self._update_section_status(i, t, True, c))
                             break
                 else:
-                    self.auto_log(f"   ⚠️ {card_type}: Falló")
+                    error_msg = res.get("error", "Error desconocido")
+                    log_func(f"   ⚠️ {card_type}: Falló ({error_msg})")
 
-        self.auto_log(f"\n{'='*60}")
-        self.auto_log(f"✅ GENERACIÓN COMPLETADA")
-        self.auto_log(f"   • Secciones procesadas: {successful_sections}/{len(results)}")
-        self.auto_log(f"   • Total flashcards en sala de espera: {total_generated}")
-        self.auto_log(f"   • ACCIÓN REQUERIDA: Presiona '✅ Ejecutar Sincronización' para importar.")
-        self.auto_log("="*60 + "\n")
+        log_func(f"\n{'='*60}")
+        log_func(f"✅ GENERACIÓN COMPLETADA")
+        log_func(f"   • Secciones procesadas: {successful_sections}/{len(results)}")
+        log_func(f"   • Total flashcards en sala de espera: {total_generated}")
+        log_func(f"   • ACCIÓN REQUERIDA: Presiona '✅ Ejecutar Sincronización' para importar.")
+        log_func("="*60 + "\n")
         
         # Actualizar botón de pendientes
         self.root.after(0, self._update_pending_button)
@@ -3104,6 +3137,19 @@ class AnkiImportInterface:
     def text_log(self, message: str):
         """Añade un mensaje al log del modo de texto."""
         self.ui_queue.put({"type": "log", "target": "text", "message": message})
+    
+    def _mode_log(self, message: str):
+        """Añade un mensaje al log según el modo activo."""
+        if self.current_mode == "automatic_text":
+            self.text_log(message)
+        elif self.current_mode == "automatic_audio":
+            self.audio_log(message)
+        elif self.current_mode == "automatic_videos":
+            self.video_log(message)
+        elif self.current_mode == "automatic_books":
+            self.book_log(message)
+        else:
+            self.auto_log(message)
     
     # ==================== MÉTODOS DE TEXTO ====================
     
@@ -3519,6 +3565,13 @@ class AnkiImportInterface:
                     deck_base += f"{bisabuelo_str}::"
                 deck_base += f"{grandparent_str}::{section.title}"
                 
+                section_res = {
+                    "section": section.title,
+                    "success": True,
+                    "results": {},
+                    "qyi_metrics": qyi_metrics
+                }
+                
                 # Procesar resultados
                 for card_type, result in results.items():
                     if result.get("success"):
@@ -3530,21 +3583,36 @@ class AnkiImportInterface:
                             count = len(flashcard_list)
                             total_flashcards += count
                             
-                            # AGREGAR A SALA DE ESPERA
-                            self.pending_flashcard_imports.append({
-                                "deck_name": deck_base,
-                                "card_type": card_type,
-                                "flashcards": flashcard_list
-                            })
-                            
                             self.root.after(0, lambda sid=section.section_id, ct=card_type, c=count:
                                           self._update_text_section_status(sid, ct, True, c))
+                            
+                            section_res["results"][card_type] = {
+                                "success": True,
+                                "count": count,
+                                "flashcards": flashcard_list,
+                                "deck": deck_base
+                            }
                         else:
+                            self.text_log(f"   ⚠️ No se pudieron estructurar tarjetas para '{card_type}' (respuesta: '{raw_content[:60]}...')")
                             self.root.after(0, lambda sid=section.section_id, ct=card_type:
                                           self._update_text_section_status(sid, ct, False, 0))
+                            
+                            section_res["results"][card_type] = {
+                                "success": False,
+                                "error": "No flashcards parsed"
+                            }
                     else:
+                        error_msg = result.get("error", "Error desconocido")
+                        self.text_log(f"   ❌ Error al generar tipo '{card_type}': {error_msg}")
                         self.root.after(0, lambda sid=section.section_id, ct=card_type:
                                       self._update_text_section_status(sid, ct, False, 0))
+                        
+                        section_res["results"][card_type] = {
+                            "success": False,
+                            "error": error_msg
+                        }
+                
+                processing_results.append(section_res)
             
             # Mostrar resumen final
             self.root.after(0, lambda: self._show_processing_summary(processing_results))
@@ -4378,8 +4446,9 @@ class AnkiImportInterface:
                             self.video_log(f"      • {card_type}: {count} tarjetas en espera → {deck_name}")
                             # Acumular en Sala de Espera para deduplicación
                             if flashcards and deck_name:
+                                deck_path = self._get_deck_with_type_label(deck_name, card_type)
                                 self.pending_flashcard_imports.append({
-                                    "deck_name": deck_name,
+                                    "deck_name": deck_path,
                                     "card_type": card_type,
                                     "flashcards": flashcards
                                 })
@@ -5823,10 +5892,7 @@ class AnkiImportInterface:
     def _update_pending_button(self):
         """Actualiza el texto del botón de pendientes con la cantidad."""
         try:
-            if not getattr(self, "flashcard_generator", None):
-                self.flashcard_generator = GeminiFlashcardGenerator(log_callback=self.auto_log)
-            
-            count = self.flashcard_generator.get_pending_count()
+            count = len(self.pending_flashcard_imports)
             
             # Update all pending buttons that might exist in different tabs
             pending_buttons = []
@@ -5847,16 +5913,13 @@ class AnkiImportInterface:
     
     def import_pending_flashcards(self):
         """Importa las flashcards pendientes."""
-        if not self.flashcard_generator:
-            self.flashcard_generator = GeminiFlashcardGenerator(log_callback=self.auto_log)
-        
-        count = self.flashcard_generator.get_pending_count()
+        count = len(self.pending_flashcard_imports)
         
         if count == 0:
             messagebox.showinfo("Sin pendientes", "No hay flashcards pendientes de importar.")
             return
         
-        msg = f"Hay {count} lote(s) de flashcards pendientes de importar.\n\n"
+        msg = f"Hay {count} lote(s) de flashcards en la sala de espera pendientes de importar.\n\n"
         msg += "Asegúrate de que Anki esté abierto antes de continuar.\n\n"
         msg += "¿Deseas importarlas ahora?"
         
@@ -5865,33 +5928,9 @@ class AnkiImportInterface:
         
         # Importar en thread
         def do_import():
-            self.auto_log("\n" + "="*50)
-            self.auto_log("📋 IMPORTANDO FLASHCARDS PENDIENTES...")
-            self.auto_log("="*50)
-            
-            result = self.flashcard_generator.import_pending_flashcards(self.anki_manager)
-            
-            self.auto_log("="*50 + "\n")
-            
-            # Actualizar botón
+            self.execute_deduplicated_import()
             self.root.after(0, self._update_pending_button)
-            
-            # Si se importaron exitosamente, resetear indicadores visuales
-            if result.get("imported", 0) > 0:
-                self.root.after(0, self._reset_all_status_indicators)
-                self.root.after(0, lambda: messagebox.showinfo(
-                    "✅ Importación completada",
-                    f"Se importaron {result['imported']} flashcards exitosamente.\n\n"
-                    f"Pendientes restantes: {result.get('still_pending', 0)}\n\n"
-                    f"Los indicadores visuales se han reseteado."
-                ))
-            elif result.get("still_pending", 0) > 0:
-                self.root.after(0, lambda: messagebox.showwarning(
-                    "⚠️ Importación fallida",
-                    f"No se pudieron importar las flashcards.\n\n"
-                    f"Verifica que Anki esté abierto y AnkiConnect instalado.\n\n"
-                    f"Pendientes: {result.get('still_pending', 0)}"
-                ))
+            self.root.after(0, self._reset_all_status_indicators)
         
         thread = threading.Thread(target=do_import, daemon=True)
         thread.start()
@@ -6587,7 +6626,7 @@ class AnkiImportInterface:
                     "section": section.title,
                     "success": True,
                     "qyi_metrics": qyi_metrics,
-                    "card_counts": {}
+                    "results": {}
                 }
 
                 for card_type, result in results.items():
@@ -6605,20 +6644,46 @@ class AnkiImportInterface:
                                 deck_name = ""
                                 if bisabuelo: deck_name += f"{bisabuelo}::"
                                 if grandparent: deck_name += f"{grandparent}::"
-                                deck_name += f"{section.title}::{card_type}"
+                                deck_name += f"{section.title}"
+                                deck_path = self._get_deck_with_type_label(deck_name, card_type)
 
-                                self.pending_flashcard_imports.append({
-                                    "deck_name": deck_name,
-                                    "card_type": card_type,
-                                    "flashcards": flashcard_list
-                                })
                                 count = len(flashcard_list)
-                                section_results["card_counts"][card_type] = count
+                                section_results["results"][card_type] = {
+                                    "success": True,
+                                    "count": count,
+                                    "flashcards": flashcard_list,
+                                    "deck": deck_name
+                                }
                                 total_flashcards += count
                                 
                                 self.audio_log(f"   ✅ {card_type}: {count} flashcards en espera → {deck_name}")
                                 self.root.after(0, lambda sid=section.section_id, ct=card_type, c=count:
                                               self._update_audio_section_status(sid, ct, True, c))
+                            else:
+                                self.audio_log(f"   ⚠️ No se pudieron estructurar tarjetas para '{card_type}'")
+                                self.root.after(0, lambda sid=section.section_id, ct=card_type:
+                                              self._update_audio_section_status(sid, ct, False, 0))
+                                section_results["results"][card_type] = {
+                                    "success": False,
+                                    "error": "No flashcards parsed"
+                                }
+                        else:
+                            self.audio_log(f"   ⚠️ No se pudieron estructurar tarjetas para '{card_type}'")
+                            self.root.after(0, lambda sid=section.section_id, ct=card_type:
+                                          self._update_audio_section_status(sid, ct, False, 0))
+                            section_results["results"][card_type] = {
+                                "success": False,
+                                "error": "No flashcards parsed"
+                            }
+                    else:
+                        error_msg = result.get("error", "Error desconocido")
+                        self.audio_log(f"   ❌ Error al generar tipo '{card_type}': {error_msg}")
+                        self.root.after(0, lambda sid=section.section_id, ct=card_type:
+                                      self._update_audio_section_status(sid, ct, False, 0))
+                        section_results["results"][card_type] = {
+                            "success": False,
+                            "error": error_msg
+                        }
                 
                 processing_results.append(section_results)
 
@@ -6771,6 +6836,26 @@ class AnkiImportInterface:
             self.auto_log("✅ Proceso de filtrado semántico finalizado en memoria.")
             
         DeduplicationUI(self.root, self.pending_flashcard_imports, on_dedup_complete, engine=self.dedup_engine)
+
+    def open_evaluation_window(self):
+        """Abre la ventana de evaluación didáctica y topológica con las flashcards en espera."""
+        if not self.pending_flashcard_imports:
+            messagebox.showinfo("Evaluación", "No hay tarjetas generadas en la sala de espera para evaluar.")
+            return
+            
+        # Asegurar que el generador esté inicializado
+        if not self.flashcard_generator:
+            active_config = self.config_manager.get_active_set()
+            self.flashcard_generator = GeminiFlashcardGenerator(
+                log_callback=self._mode_log,
+                config_set=active_config
+            )
+            
+        def on_eval_complete(filtered_imports):
+            self.pending_flashcard_imports = filtered_imports
+            self._mode_log("✅ Proceso de evaluación y filtrado didáctico finalizado en memoria.")
+            
+        EvaluationUI(self.root, self.pending_flashcard_imports, on_eval_complete, generator=self.flashcard_generator)
 
     def execute_deduplicated_import(self):
         """Sincroniza la sala de espera filtrada a Anki."""
