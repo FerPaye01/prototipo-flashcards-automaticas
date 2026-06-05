@@ -4,6 +4,7 @@ import threading
 import re
 import json
 import os
+import numpy as np
 from typing import List, Dict, Any, Callable, Tuple
 
 class EvaluationUI(tk.Toplevel):
@@ -66,7 +67,12 @@ class EvaluationUI(tk.Toplevel):
             "impacto para un examen o aplicación real en lugar de trivia superficial.\n\n"
             "3. Cobertura Topológica (Φ_C): Analiza la importancia del concepto usando PageRank Personalizado "
             "sobre un Grafo de Conocimiento (EduKG), priorizando conceptos umbral (Threshold Concepts).\n\n"
-            "Fórmula QYI (Quality Yield Index): QYI = 0.3*Φ_Q + 0.4*Φ_Y + 0.3*Φ_C"
+            "Fórmula QYI (Quality Yield Index): QYI = 0.3*Φ_Q + 0.4*Φ_Y + 0.3*Φ_C\n\n"
+            "📋 Tabla de umbrales por duración de video:\n"
+            "• < 15 min (intro): 8–20 conceptos | Normalización: Percentil | QYI: ≥ 0.70\n"
+            "• 15–30 min (intermedio): 20–40 conceptos | Normalización: Percentil o Min-Max | QYI: ≥ 0.75\n"
+            "• 30–60 min (avanzado): 40–80 conceptos | Normalización: Min-Max | QYI: ≥ 0.80\n"
+            "• > 60 min (especializado): 80+ conceptos | Normalización: Min-Max | QYI: ≥ 0.80"
         )
         lbl_explain = tk.Message(explain_frame, text=explain_text, width=320, font=("Segoe UI", 9), justify="left", fg="#333333")
         lbl_explain.pack(fill="both", expand=True)
@@ -460,10 +466,27 @@ class EvaluationUI(tk.Toplevel):
             
             # 5. Mapear y computar puntuación de utilidad individual
             alpha, beta, gamma = 0.3, 0.4, 0.3
-            all_pr = list(pagerank.values())
-            pr_min = min(all_pr) if all_pr else 0.0
-            pr_max = max(all_pr) if all_pr else 1.0
-            pr_range = pr_max - pr_min if pr_max > pr_min else 1.0
+            
+            # Construir normalizador de percentil de PageRank
+            def build_pr_percentile_normalizer(pagerank_values: dict):
+                values = np.array(list(pagerank_values.values()))
+                def normalize_pr(pr_value: float) -> float:
+                    if len(values) <= 1:
+                        return 1.0
+                    percentile = np.mean(values <= pr_value)
+                    return float(percentile)
+                return normalize_pr
+                
+            normalize_pr = build_pr_percentile_normalizer(pagerank)
+            
+            # Calcular umbral dinámico para Y_i (percentil 60)
+            def calcular_pr_threshold_dinamico(pagerank_values: dict, percentil_corte: float = 0.60) -> float:
+                values = list(pagerank_values.values())
+                if not values:
+                    return 0.0
+                return float(np.percentile(values, percentil_corte * 100))
+                
+            pr_threshold = calcular_pr_threshold_dinamico(pagerank)
             
             qualities = []
             is_high = []
@@ -473,30 +496,34 @@ class EvaluationUI(tk.Toplevel):
                 # Encontrar evaluación correspondiente
                 eval_data = next((e for e in evals if e.get('original_id') == idx), None)
                 calidad = eval_data.get('calidad', 7) if eval_data else 7
-                impacto = eval_data.get('impacto', 'N') if eval_data else 'N'
+                bloom = int(eval_data.get('bloom', 2)) if eval_data else 2
                 explicacion = eval_data.get('explicacion', "Completado.") if eval_data else "Evaluado con éxito."
                 matched_concept = eval_data.get('concepto', 'general') if eval_data else 'general'
                 
                 # Asignar concepto obtenido del LLM directamente
                 card['concept'] = matched_concept
                 
-                # Obtener centralidad de PageRank
+                # Obtener centralidad de PageRank y normalizar con percentil
                 pr_val = pagerank.get(matched_concept, 0.0)
-                norm_pr = (pr_val - pr_min) / pr_range if pr_range > 0 else 0.5
+                norm_pr = normalize_pr(pr_val)
+                
+                # Determinar Y_i dinámico
+                is_yield = (pr_val >= pr_threshold) and (bloom >= 2)
+                impacto_str = 'S' if is_yield else 'N'
                 
                 # Calcular utilidad individual
-                util_score = alpha * (calidad / 10.0) + beta * (1.0 if impacto == 'S' else 0.0) + gamma * norm_pr
+                util_score = alpha * (calidad / 10.0) + beta * (1.0 if is_yield else 0.0) + gamma * norm_pr
                 
                 # Guardar valores evaluados
                 card['_status'] = "Evaluada"
                 card['_calidad'] = calidad
-                card['_impacto'] = impacto
+                card['_impacto'] = impacto_str
                 card['_centralidad'] = pr_val
                 card['_utilidad'] = util_score
                 card['_explicacion'] = explicacion
                 
                 qualities.append(calidad / 10.0)
-                is_high.append(impacto == 'S')
+                is_high.append(is_yield)
                 card_concepts.append(matched_concept)
                 
             # 6. Calcular QYI global del deck
@@ -521,9 +548,10 @@ class EvaluationUI(tk.Toplevel):
             prompt = (
                 "Eres un Evaluador Pedagógico Senior de Flashcards de Anki. Evalúa las siguientes tarjetas respecto a:\n"
                 "1. Calidad didáctica (0 a 10).\n"
-                "2. Si son de alto impacto para un examen técnico o práctica real (impacto 'S' para sí, 'N' para no).\n"
-                "3. El concepto técnico o tema muy específico y atómico al que está anclada la tarjeta (máximo 3 palabras, ej: 'triada CIA', 'cifrado', 'confidencialidad', 'hashing', 'BCDR'; NO uses 'general', 'varios', 'pregunta', ni nombres de sección genéricos).\n"
-                "4. Explicación muy breve (máximo 15 palabras).\n\n"
+                "2. Nivel Bloom (1 a 4): 1=Recordar, 2=Entender, 3=Aplicar, 4=Analizar/Evaluar.\n"
+                "3. Si son de alto impacto para un examen técnico o práctica real (impacto 'S' para sí, 'N' para no).\n"
+                "4. El concepto técnico o tema muy específico y atómico al que está anclada la tarjeta (máximo 3 palabras, ej: 'triada CIA', 'cifrado', 'confidencialidad', 'hashing', 'BCDR'; NO uses 'general', 'varios', 'pregunta', ni nombres de sección genéricos).\n"
+                "5. Explicación muy breve (máximo 15 palabras).\n\n"
                 f"Texto de referencia: {text[:1200]}\n\n"
                 "Flashcards a evaluar:\n"
             )
@@ -532,7 +560,7 @@ class EvaluationUI(tk.Toplevel):
                 
             prompt += (
                 "\nResponde ÚNICAMENTE con un arreglo JSON en este formato:\n"
-                '[{"id": 0, "calidad": 8, "impacto": "S", "concepto": "triada CIA", "explicacion": "Explicación corta"}, ...]\n'
+                '[{"id": 0, "calidad": 8, "bloom": 2, "impacto": "S", "concepto": "triada CIA", "explicacion": "Explicación corta"}, ...]\n'
                 "No agregues texto introductorio o de cierre fuera del JSON."
             )
             
@@ -550,6 +578,7 @@ class EvaluationUI(tk.Toplevel):
                             words = re.findall(r'\b\w{4,}\b', txt)
                             concept_val = words[0] if words else "general"
                         e['concepto'] = concept_val
+                        e['bloom'] = int(e.get('bloom', 2))
                     all_evals.extend(batch_evals)
                 else:
                     raise ValueError("JSON no encontrado o defectuoso")
@@ -562,6 +591,7 @@ class EvaluationUI(tk.Toplevel):
                     all_evals.append({
                         "original_id": batch_idx + idx,
                         "calidad": 7,
+                        "bloom": 2,
                         "impacto": "N",
                         "concepto": fallback_concept,
                         "explicacion": "Fallo al procesar rúbrica IA."

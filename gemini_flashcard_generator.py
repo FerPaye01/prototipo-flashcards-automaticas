@@ -11,6 +11,7 @@ import re
 from typing import List, Dict, Any, Callable, Optional, Tuple
 from datetime import datetime
 from dotenv import load_dotenv
+import numpy as np
 import google.generativeai as genai
 from PIL import Image
 from config_sets_manager import (DEFAULT_PROMPTS, DEFAULT_PROMPTS2, DEFAULT_PROMPTS3,
@@ -159,14 +160,29 @@ class GeminiFlashcardGenerator:
         self.kg_ranker.build_graph(concepts, source_text, edges=edges)
         pagerank = self.kg_ranker.calculate_pagerank()
         
-        evals = self._watchdog_evaluate(source_text, flashcards)
-        qualities = [e.get('calidad', 7)/10.0 for e in evals]
-        is_high = [e.get('impacto', 'N') == 'S' for e in evals]
+        # Calcular umbral dinámico para Y_i (percentil 60)
+        all_pr_values = list(pagerank.values())
+        pr_threshold = float(np.percentile(all_pr_values, 60)) if all_pr_values else 0.0
         
+        evals = self._watchdog_evaluate(source_text, flashcards)
+        
+        qualities = []
+        is_high = []
         card_concepts = []
-        for c in flashcards:
-            txt = (c.get('front','') + c.get('P','')).lower()
-            card_concepts.append(next((cp for cp in concepts if cp.lower() in txt), "general"))
+        
+        for idx, card in enumerate(flashcards):
+            # Encontrar la evaluación correspondiente
+            eval_data = next((e for e in evals if e.get('original_id') == idx), None)
+            calidad = eval_data.get('calidad', 7) if eval_data else 7
+            bloom = int(eval_data.get('bloom', 2)) if eval_data else 2
+            matched_concept = eval_data.get('concepto', 'general').strip().lower() if eval_data else 'general'
+            
+            pr_val = pagerank.get(matched_concept, 0.0)
+            is_yield = (pr_val >= pr_threshold) and (bloom >= 2)
+            
+            qualities.append(calidad / 10.0)
+            is_high.append(is_yield)
+            card_concepts.append(matched_concept)
             
         metrics = self.qyi_evaluator.calculate_qyi(qualities, is_high, pagerank, card_concepts)
         self.last_evaluation_metrics = metrics
@@ -221,15 +237,64 @@ class GeminiFlashcardGenerator:
         return edges
 
     def _watchdog_evaluate(self, text: str, cards: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-        prompt = f"Evalúa estas flashcards (Calidad 0-10, Impacto S/N). Texto ref: {text[:1000]}\nCards:\n"
-        for i, c in enumerate(cards):
-            prompt += f"ID:{i} P:{c.get('front', c.get('P',''))[:100]}\n"
-        prompt += "\nResponde JSON: [{\"id\":0, \"calidad\":8, \"impacto\":\"S\"}, ...]"
-        try:
-            res = self.generate_raw_response(prompt, temperature=0.1)
-            match = re.search(r'\[.*\]', res, re.DOTALL)
-            return json.loads(match.group()) if match else []
-        except: return []
+        batch_size = 10
+        all_evals = []
+        total_cards = len(cards)
+        
+        for batch_idx in range(0, total_cards, batch_size):
+            batch = cards[batch_idx:batch_idx + batch_size]
+            prompt = (
+                "Eres un Evaluador Pedagógico Senior de Flashcards de Anki. Evalúa las siguientes tarjetas respecto a:\n"
+                "1. Calidad didáctica (0 a 10).\n"
+                "2. Nivel Bloom (1 a 4): 1=Recordar, 2=Entender, 3=Aplicar, 4=Analizar/Evaluar.\n"
+                "3. Si son de alto impacto para un examen técnico o práctica real (impacto 'S' para sí, 'N' para no).\n"
+                "4. El concepto técnico o tema muy específico y atómico al que está anclada la tarjeta (máximo 3 palabras, ej: 'triada CIA', 'cifrado', 'confidencialidad', 'hashing', 'BCDR'; NO uses 'general', 'varios', 'pregunta', ni nombres de sección genéricos).\n"
+                "5. Explicación muy breve (máximo 15 palabras).\n\n"
+                f"Texto de referencia: {text[:1200]}\n\n"
+                "Flashcards a evaluar:\n"
+            )
+            for idx, c in enumerate(batch):
+                prompt += f"ID:{idx} | P: {c.get('front', c.get('P', ''))[:120]} | R: {c.get('back', c.get('R', ''))[:120]}\n"
+                
+            prompt += (
+                "\nResponde ÚNICAMENTE con un arreglo JSON en este formato:\n"
+                '[{"id": 0, "calidad": 8, "bloom": 2, "impacto": "S", "concepto": "triada CIA", "explicacion": "Explicación corta"}, ...]\n'
+                "No agregues texto introductorio o de cierre fuera del JSON."
+            )
+            
+            try:
+                res = self.generate_raw_response(prompt, temperature=0.1)
+                match = re.search(r'\[.*\]', res, re.DOTALL)
+                if match:
+                    batch_evals = json.loads(match.group())
+                    for e in batch_evals:
+                        e['original_id'] = batch_idx + e['id']
+                        concept_val = e.get('concepto', 'general').strip().lower()
+                        if not concept_val or concept_val in ["general", "varios", "pregunta"]:
+                            txt = (batch[e['id']].get('front', batch[e['id']].get('P', '')) + 
+                                   batch[e['id']].get('back', batch[e['id']].get('R', ''))).lower()
+                            words = re.findall(r'\b\w{4,}\b', txt)
+                            concept_val = words[0] if words else "general"
+                        e['concepto'] = concept_val
+                        e['bloom'] = int(e.get('bloom', 2))
+                    all_evals.extend(batch_evals)
+                else:
+                    raise ValueError("JSON no encontrado o defectuoso")
+            except Exception as e:
+                # Fallback
+                for idx, card in enumerate(batch):
+                    txt = (card.get('front', card.get('P', '')) + card.get('back', card.get('R', ''))).lower()
+                    words = re.findall(r'\b\w{4,}\b', txt)
+                    fallback_concept = words[0] if words else "general"
+                    all_evals.append({
+                        "original_id": batch_idx + idx,
+                        "calidad": 7,
+                        "bloom": 2,
+                        "impacto": "N",
+                        "concepto": fallback_concept,
+                        "explicacion": f"Fallo al procesar rúbrica IA: {e}"
+                    })
+        return all_evals
 
     # --- MODALIDADES DE PROCESAMIENTO ---
 

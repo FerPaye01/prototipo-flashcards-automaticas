@@ -45,26 +45,20 @@ class QYIEvaluator:
 
         # 3. Sub-índice de Cobertura Topológica (Phi_C)
         if m_star > 0:
-            # Normalizar PageRank scores (Min-Max)
-            all_pr = list(pagerank_scores.values())
-            if all_pr:
-                pr_min = min(all_pr)
-                pr_max = max(all_pr)
-                pr_range = pr_max - pr_min if pr_max > pr_min else 1.0
-                
-                if pr_max > pr_min:
-                    # Normalización min-max adaptativa con un piso mínimo de 0.20 para evitar penalizar nodos hoja a 0.0
-                    min_floor = 0.20
-                    normalized_pr = {k: min_floor + (1.0 - min_floor) * (v - pr_min) / pr_range for k, v in pagerank_scores.items()}
-                else:
-                    # Evitar penalizar con 0.0 cuando todos los conceptos tienen la misma importancia
-                    normalized_pr = {k: 0.5 for k in pagerank_scores.keys()}
+            all_pr = np.array(list(pagerank_scores.values()))
+            if len(all_pr) > 0:
+                def normalize_pr(pr_value: float) -> float:
+                    if len(all_pr) <= 1:
+                        return 1.0
+                    percentile = np.mean(all_pr <= pr_value)
+                    return float(percentile)
                 
                 sum_pr = 0.0
                 for i in range(M):
                     if is_high_impact[i]:
                         concept = card_concepts[i].lower().strip()
-                        sum_pr += normalized_pr.get(concept, 0.5) # 0.5 default if not found
+                        pr_val = pagerank_scores.get(concept, 0.0)
+                        sum_pr += normalize_pr(pr_val)
                 
                 phi_c = sum_pr / m_star
             else:
