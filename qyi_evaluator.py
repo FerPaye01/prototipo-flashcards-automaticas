@@ -135,11 +135,14 @@ class EduKGRanker:
         if not self.graph.nodes:
             return {}
         
+        # Convertir a grafo no-dirigido para capturar conceptos umbral (tanto paraguas/generales como convergentes/específicos)
+        undirected_graph = self.graph.to_undirected()
+        
         try:
-            return nx.pagerank(self.graph, alpha=0.85, personalization=personalization, weight='weight')
+            return nx.pagerank(undirected_graph, alpha=0.85, personalization=personalization, weight='weight')
         except:
             # Fallback a PageRank uniforme si falla el personalizado
-            return nx.pagerank(self.graph, alpha=0.85, weight='weight')
+            return nx.pagerank(undirected_graph, alpha=0.85, weight='weight')
 
 def evaluate_with_watchdog(gemini_generator, texto_ocr: str, flashcards: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """
