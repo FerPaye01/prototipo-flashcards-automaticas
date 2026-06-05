@@ -275,6 +275,8 @@ class AnkiSyncManager:
     def format_flashcard_to_anki(self, flashcard: Dict[str, str], card_type: str) -> Dict[str, Any]:
         """
         Convierte un flashcard al formato de Anki.
+        Autodetecta dinámicamente si los modelos de Anki usan idioma inglés (Basic/Cloze)
+        o español (Básico/Respuesta anidada) y ajusta los nombres de campos en consecuencia.
         
         Args:
             flashcard: Diccionario con los datos del flashcard
@@ -283,23 +285,61 @@ class AnkiSyncManager:
         Returns:
             Dict con el formato de nota de Anki
         """
-        # Determinar si es tipo Cloze
         is_cloze = card_type in [self.CARD_TYPE_CLOZE, "level_1_cloze"]
+        models = self._get_available_models()
         
         if is_cloze:
-            # Cloze: campos "Texto" y "Extra"
+            # Buscar el nombre del modelo de Cloze
+            model_name = "Respuesta anidada"
+            if models:
+                if "Respuesta anidada" in models:
+                    model_name = "Respuesta anidada"
+                elif "Cloze" in models:
+                    model_name = "Cloze"
+                else:
+                    for m in models:
+                        if "cloze" in m.lower() or "anidada" in m.lower():
+                            model_name = m
+                            break
+            
+            # Determinar nombres de campos para Cloze
+            text_field = "Texto"
+            extra_field = "Extra"
+            if "cloze" in model_name.lower():
+                text_field = "Text"
+                extra_field = "Extra"
+                
             return {
                 "deckName": "",
-                "modelName": "Respuesta anidada",
+                "modelName": model_name,
                 "fields": {
-                    "Texto": flashcard.get("front", ""),
-                    "Extra": flashcard.get("back", "")
+                    text_field: flashcard.get("front", flashcard.get("text", "")),
+                    extra_field: flashcard.get("back", flashcard.get("extra", ""))
                 },
                 "tags": flashcard.get("tags", [])
             }
         
         else:
-            # Basic, Multiple Choice, Vocabulary, Niveles 2-4: campos "Anverso" y "Reverso"
+            # Buscar el nombre del modelo Básico
+            model_name = "Básico"
+            if models:
+                if "Básico" in models:
+                    model_name = "Básico"
+                elif "Basic" in models:
+                    model_name = "Basic"
+                else:
+                    for m in models:
+                        if "basic" in m.lower() or "básico" in m.lower() or "basico" in m.lower():
+                            model_name = m
+                            break
+            
+            # Determinar nombres de campos para Basic
+            front_field = "Anverso"
+            back_field = "Reverso"
+            if "basic" in model_name.lower():
+                front_field = "Front"
+                back_field = "Back"
+                
             front = flashcard.get("front", "")
             options = flashcard.get("options", [])
             
@@ -310,10 +350,10 @@ class AnkiSyncManager:
             
             return {
                 "deckName": "",
-                "modelName": "Básico",
+                "modelName": model_name,
                 "fields": {
-                    "Anverso": front,
-                    "Reverso": flashcard.get("back", "")
+                    front_field: front,
+                    back_field: flashcard.get("back", "")
                 },
                 "tags": flashcard.get("tags", [])
             }

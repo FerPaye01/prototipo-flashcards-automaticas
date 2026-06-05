@@ -7010,6 +7010,7 @@ class AnkiImportInterface:
         self.auto_log("📤 INICIANDO IMPORTACIÓN SINCRONIZADA A ANKI")
         self.auto_log(f"{'='*60}")
         
+        failed_groups = []
         for group in self.pending_flashcard_imports:
             deck_name = group['deck_name']
             card_type = group['card_type']
@@ -7029,12 +7030,26 @@ class AnkiImportInterface:
                 total_imported += count
             else:
                 self.auto_log(f"   ❌ Error importando a {deck_name}: {msg}")
+                failed_groups.append(group)
                 
         self.auto_log(f"\n✅ Proceso completado: {total_imported} tarjetas importadas a Anki.")
-        messagebox.showinfo("Importación Completada", f"Se han importado {total_imported} flashcards a Anki correctamente respetando los mazos hijos.")
         
-        # Limpiar la sala de espera
-        self.pending_flashcard_imports = []
+        if failed_groups:
+            self.auto_log(f"   ⚠️ {len(failed_groups)} lote(s) no pudieron ser importados y se conservan en la sala de espera.")
+            messagebox.showwarning(
+                "Importación Parcial o Fallida",
+                f"Se han importado {total_imported} flashcards.\n\n"
+                f"{len(failed_groups)} lote(s) fallaron y permanecen en la sala de espera.\n\n"
+                "Asegúrate de que:\n"
+                "1. Anki esté abierto.\n"
+                "2. Hayas seleccionado un perfil en Anki (no te quedes en la pantalla de selección de perfil).\n"
+                "3. El complemento AnkiConnect esté instalado y configurado correctamente."
+            )
+        else:
+            messagebox.showinfo("Importación Completada", f"Se han importado {total_imported} flashcards a Anki correctamente respetando los mazos hijos.")
+            
+        # Conservar solo los grupos fallidos en la sala de espera
+        self.pending_flashcard_imports = failed_groups
         self._save_pending_queue()
         self._update_pending_button()
 
