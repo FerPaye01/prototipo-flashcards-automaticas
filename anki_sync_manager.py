@@ -27,7 +27,7 @@ except ImportError:
 class AnkiSyncManager:
     """Gestor de sincronización con Anki a través de AnkiConnect."""
     
-    ANKI_CONNECT_URL = "http://localhost:8765"
+    ANKI_CONNECT_URL = "http://127.0.0.1:8765"
     ANKI_CONNECT_VERSION = 6
     
     # Tipos de flashcards soportados
@@ -38,7 +38,7 @@ class AnkiSyncManager:
     
     def __init__(self, connect_url: Optional[str] = None):
         """Inicializa el gestor de sincronización."""
-        self.ANKI_CONNECT_URL = connect_url or os.getenv("ANKI_CONNECT_URL", "http://localhost:8765")
+        self.ANKI_CONNECT_URL = connect_url or os.getenv("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
         self.anki_running = False
         self.anki_process = None
         self.last_error = None
