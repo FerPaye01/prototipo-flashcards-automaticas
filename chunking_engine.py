@@ -14,7 +14,7 @@ try:
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "hwaccel;none"
     os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
     
-    from scenedetect import detect, ContentDetector, AdaptiveDetector
+    from scenedetect import detect, ContentDetector, AdaptiveDetector, SceneManager, open_video
     SCENEDETECT_AVAILABLE = True
 except ImportError:
     SCENEDETECT_AVAILABLE = False
@@ -120,8 +120,46 @@ class SemanticVideoChunker(BaseSemanticChunker):
         try:
             logging.info(f"[SemanticVideoChunker] Analizando video: {os.path.basename(filepath)}")
             
-            # Usar AdaptiveDetector para detectar cambios abruptos y transiciones suaves (diapositivas)
-            scene_list = detect(filepath, AdaptiveDetector(adaptive_threshold=3.0))
+            # Abrir el video para obtener propiedades para los logs
+            video = open_video(filepath)
+            total_frames = video.duration.frame_num
+            total_seconds = video.duration.get_seconds()
+            fps = video.frame_rate
+            
+            logging.info(f"[SemanticVideoChunker] Metadatos del video:")
+            logging.info(f"   - Duración: {total_seconds:.2f} segundos")
+            logging.info(f"   - Fotogramas totales: {total_frames}")
+            logging.info(f"   - FPS: {fps}")
+            
+            # Inicializar SceneManager y añadir detector adaptativo
+            scene_manager = SceneManager()
+            scene_manager.add_detector(AdaptiveDetector(adaptive_threshold=3.0))
+            
+            # Downscale de 2 para multiplicar la velocidad por 4 sin perder precisión semántica
+            scene_manager.auto_downscale = False
+            scene_manager.downscale = 2
+            
+            logging.info(f"[SemanticVideoChunker] Iniciando detección de escenas (downscale=2)...")
+            
+            # Callback para reportar progreso en logs cada 10%
+            progress_step = max(1, total_frames // 10)
+            
+            def on_progress(frame_img, frame_num):
+                # frame_num es un objeto FrameTimecode. Obtenemos el número entero de fotograma.
+                frame_int = getattr(frame_num, 'frame_num', None)
+                if frame_int is None:
+                    try:
+                        frame_int = int(frame_num)
+                    except:
+                        frame_int = frame_num
+                        
+                if isinstance(frame_int, int):
+                    if frame_int % progress_step == 0 or frame_int == 1:
+                        percentage = (frame_int / total_frames) * 100
+                        logging.info(f"[SemanticVideoChunker] Detección al {percentage:.1f}% ({frame_int}/{total_frames} fotogramas procesados)")
+            
+            scene_manager.detect_scenes(video=video, show_progress=True, callback=on_progress)
+            scene_list = scene_manager.get_scene_list()
             
             if not scene_list:
                 return {
