@@ -3601,6 +3601,12 @@ class AnkiImportInterface:
                             count = len(flashcard_list)
                             total_flashcards += count
                             
+                            # Guardar flashcards generadas en la carpeta de la sesión de texto
+                            if hasattr(self, 'current_text_session') and self.current_text_session:
+                                self.flashcard_generator._save_flashcards_tsv(
+                                    tsv_content, self.current_text_session, section.title, card_type
+                                )
+                            
                             self.root.after(0, lambda sid=section.section_id, ct=card_type, c=count:
                                           self._update_text_section_status(sid, ct, True, c))
                             
@@ -3631,6 +3637,9 @@ class AnkiImportInterface:
                         }
                 
                 processing_results.append(section_res)
+            
+            # Asegurar que la sesión de texto se guarde con su ruta de flashcards vinculada
+            self._save_current_text_session()
             
             # Mostrar resumen final
             self.root.after(0, lambda: self._show_processing_summary(processing_results))
@@ -5091,6 +5100,7 @@ class AnkiImportInterface:
                 "father_prefix": self.parent_prefix.get(),
                 "first_section": first_section_title,
                 "num_sections": len(self.text_sections),
+                "flashcard_session_path": getattr(self, 'current_text_session', None),
                 "sections": []
             }
             
@@ -5365,6 +5375,31 @@ class AnkiImportInterface:
     
     def _recover_text_session(self, session_data: dict, replace: bool):
         """Recupera una sesión de texto guardada."""
+        # --- NUEVO: Inicializar la ruta de la sesión al inicio para evitar que auto-guardado lo ponga a null ---
+        fc_path = session_data.get("flashcard_session_path", "")
+        if not fc_path:
+            # Fallback de resolución de ruta por timestamp para sesiones antiguas
+            ggp = session_data.get("great_grandparent", "").strip()
+            gp = session_data.get("grandparent", "").strip() or "General"
+            if ggp:
+                base_dir = os.path.join(MASTER_FOLDER, ggp, gp)
+            else:
+                base_dir = os.path.join(MASTER_FOLDER, gp)
+            ts = session_data.get("timestamp", "")
+            if ts and len(ts) >= 16:
+                try:
+                    clean_ts = ts.replace("-", "").replace(" ", "_").replace(":", "")[:13]
+                    if os.path.exists(base_dir):
+                        for item in os.listdir(base_dir):
+                            if item.startswith(f"Session_{clean_ts}"):
+                                fc_path = os.path.join(base_dir, item)
+                                break
+                except Exception:
+                    pass
+        
+        if fc_path:
+            self.current_text_session = fc_path
+
         # Restaurar configuración de jerarquía si existe
         if "great_grandparent" in session_data:
             self.great_grandparent_deck.set(session_data["great_grandparent"])
@@ -5419,6 +5454,12 @@ class AnkiImportInterface:
         # Mostrar resumen
         action = "Reemplazadas" if replace else "Añadidas"
         self.text_log(f"\n📂 {action} {recovered_count} secciones de texto desde sesión guardada")
+        
+        # --- NUEVO: Recargar flashcards generadas en la Sala de Espera ---
+        if fc_path:
+            self._load_flashcards_from_session(fc_path, session_data)
+            self._save_pending_queue()
+            self._update_pending_button()
     
     def show_recover_video_session_dialog(self):
         """Muestra el diálogo para recuperar una sesión de video."""
@@ -5698,7 +5739,7 @@ class AnkiImportInterface:
 
         flashcards_dir = os.path.join(session_path, "flashcards")
         if not os.path.isdir(flashcards_dir):
-            self.video_log(f"   ℹ️ No hay flashcards guardadas en esta sesión.")
+            self._mode_log(f"   ℹ️ No hay flashcards guardadas en esta sesión.")
             return
 
         # Reconstruir jerarquía de deck
@@ -5717,18 +5758,36 @@ class AnkiImportInterface:
             # Nombre esperado: "PARTE X_card_type.txt"  o  "PARTE X_card_type_multimodal.txt"
             name_no_ext = fname[:-4]  # quitar .txt
             
-            # Separar la parte de la sección del tipo de tarjeta
-            # El sufijo siempre va después del primer guion bajo
-            parts = name_no_ext.split("_", 1)
-            if len(parts) < 2:
-                continue
+            # Buscar el tipo de tarjeta buscando coincidencias al final del nombre
+            card_type = None
+            section_part = name_no_ext
             
-            section_part = parts[0].strip()   # ej. "PARTE 1"
-            type_suffix = parts[1].strip().replace("_multimodal", "")  # ej. "exam_faithful"
+            # Buscar primero con _multimodal
+            is_multimodal = False
+            temp_name = name_no_ext
+            if temp_name.endswith("_multimodal"):
+                is_multimodal = True
+                temp_name = temp_name[:-11]  # quitar _multimodal
+                
+            # Buscar la llave de type_labels que coincide al final
+            for possible_type in sorted(type_labels.keys(), key=len, reverse=True):
+                suffix = f"_{possible_type}"
+                if temp_name.endswith(suffix):
+                    card_type = possible_type
+                    section_part = temp_name[:-len(suffix)]
+                    break
             
-            # Buscar card_type
-            card_type = suffix_to_type.get(type_suffix, type_suffix)
-            label = type_labels.get(card_type, type_suffix.replace("_", " ").title())
+            if not card_type:
+                # Fallback por si acaso
+                parts = name_no_ext.split("_", 1)
+                if len(parts) >= 2:
+                    section_part = parts[0].strip()
+                    type_suffix = parts[1].strip().replace("_multimodal", "")
+                    card_type = suffix_to_type.get(type_suffix, type_suffix)
+                else:
+                    continue
+            
+            label = type_labels.get(card_type, card_type.replace("_", " ").title())
             
             # Construir deck destino
             deck_name = ""
@@ -5761,15 +5820,33 @@ class AnkiImportInterface:
                     })
                     loaded_count += len(flashcards)
                     loaded_files += 1
+                    
+                    # Actualizar indicador visual de estado en la interfaz si aplica
+                    if self.current_mode == "automatic_text":
+                        sec_title_clean = section_part.lower().strip()
+                        for section in self.text_sections:
+                            safe_sec_title = "".join(c for c in section.title if c.isalnum() or c in " -_").strip().lower()
+                            if safe_sec_title == sec_title_clean:
+                                self.root.after(0, lambda sid=section.section_id, ct=card_type, c=len(flashcards): 
+                                              self._update_text_section_status(sid, ct, True, c))
+                                break
+                    elif self.current_mode == "automatic_videos":
+                        sec_title_clean = section_part.lower().strip()
+                        for section in self.video_sections:
+                            safe_sec_title = "".join(c for c in section.title if c.isalnum() or c in " -_").strip().lower()
+                            if safe_sec_title == sec_title_clean:
+                                self.root.after(0, lambda sid=section.section_id, ct=card_type, c=len(flashcards): 
+                                              self._update_video_section_status(sid, ct, True, c))
+                                break
 
             except Exception as e:
-                self.video_log(f"   ⚠️ Error leyendo {fname}: {e}")
+                self._mode_log(f"   ⚠️ Error leyendo {fname}: {e}")
 
         if loaded_files > 0:
-            self.video_log(f"   📋 {loaded_count} flashcards de sesión anterior cargadas en Sala de Espera ({loaded_files} archivos).")
-            self.video_log(f"   → Usa '🧠 Filtrar Interferencia (IA)' o '✅ Ejecutar Sincronización' directamente.")
+            self._mode_log(f"   📋 {loaded_count} flashcards de sesión anterior cargadas en Sala de Espera ({loaded_files} archivos).")
+            self._mode_log(f"   → Usa '🧠 Filtrar Interferencia (IA)' o '✅ Ejecutar Sincronización' directamente.")
         else:
-            self.video_log(f"   ℹ️ No se encontraron flashcards guardadas en la sesión.")
+            self._mode_log(f"   ℹ️ No se encontraron flashcards guardadas en la sesión.")
 
     def _recover_session(self, session_data: dict, replace: bool):
         """Recupera una sesión guardada."""
