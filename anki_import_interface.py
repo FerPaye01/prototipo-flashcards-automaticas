@@ -47,6 +47,23 @@ TEXT_SESSIONS_FILE = os.path.join(MASTER_FOLDER, "flashcard_text_sessions.json")
 BOOK_SESSIONS_FILE = os.path.join(MASTER_FOLDER, "flashcard_book_sessions.json")
 
 
+def clean_path_component(name: str) -> str:
+    """Limpia una cadena para que sea un nombre de carpeta/archivo válido en Windows."""
+    if not name:
+        return ""
+    # Reemplazar saltos de línea y tabuladores por espacios
+    name = name.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    # Eliminar caracteres no permitidos en nombres de archivos/carpetas en Windows
+    import re
+    name = re.sub(r'[<>:"/\\|?*]', '', name)
+    # Limpiar espacios repetidos y extremos
+    name = " ".join(name.split())
+    # Limitar longitud para evitar rutas demasiado largas en Windows
+    if len(name) > 120:
+        name = name[:117] + "..."
+    return name.strip()
+
+
 class ImageSection:
     """Representa una sección con imágenes."""
     
@@ -69,9 +86,17 @@ class ImageSection:
             thumbnail = img.copy()
             thumbnail.thumbnail((100, 100))
             
+            # Extraer número de página del nombre de archivo (ej. page_16.png -> 16)
+            import re
+            page_num = None
+            match = re.search(r'page_(\d+)', os.path.basename(path))
+            if match:
+                page_num = int(match.group(1))
+            
             image_data = {
                 "path": path,
                 "name": os.path.basename(path),
+                "page_number": page_num,
                 "size": file_size,
                 "format": img_format,
                 "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -204,6 +229,7 @@ class AnkiImportInterface:
         self.book_section_counter = 0
         self.book_section_widgets = {}
         self.extraction_mode_book = tk.StringVar(value="Apuntes de Estudiante Experto")
+        self.current_book_session = ""
         
         # Videos para modo automático (videos)
         self.video_sessions = []  # Lista de sesiones de video procesadas
@@ -872,6 +898,19 @@ class AnkiImportInterface:
         overlap_spin = ttk.Spinbox(seg_frame, from_=0, to=10, textvariable=self.pages_overlap_var, width=5)
         overlap_spin.pack(side="left", padx=5)
         
+        # Validar dinámicamente que el solape sea menor que la cantidad de páginas por sección
+        def validate_overlap(*args):
+            try:
+                p = self.pages_per_section_var.get()
+                o = self.pages_overlap_var.get()
+                if o >= p:
+                    self.pages_overlap_var.set(max(0, p - 1))
+            except:
+                pass
+                
+        self.pages_per_section_var.trace_add("write", validate_overlap)
+        self.pages_overlap_var.trace_add("write", validate_overlap)
+        
         def on_book_mode_change(*args):
             is_standard = self.book_segmentation_mode_var.get() == "Estándar (Páginas fijas)"
             state = "normal" if is_standard else "disabled"
@@ -956,7 +995,7 @@ class AnkiImportInterface:
                   command=self.show_book_recovery_dialog).pack(side="left", padx=5)
 
         ttk.Label(brow2, text="Modo Extracción:").pack(side="left", padx=(10, 2))
-        modes = ["Extracción Cruda (Fiel al documento)", "Apuntes de Estudiante Experto", "Estructuración Completa"]
+        modes = ["Extracción Cruda (Fiel al documento)", "Apuntes de Estudiante Experto", "Transcripción 100% Fiel"]
         mode_cb = ttk.Combobox(brow2, textvariable=self.extraction_mode_book, values=modes, state="readonly", width=35)
         mode_cb.pack(side="left", padx=5)
         
@@ -1016,6 +1055,7 @@ class AnkiImportInterface:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         book_name = "".join(x for x in os.path.splitext(os.path.basename(path))[0] if x.isalnum() or x in "._- ")
         output_dir = os.path.join("temp_books", f"{book_name}_{timestamp}")
+        self.current_book_session = output_dir
         
         # Redirigir logs
         old_callback = self.document_processor.log_callback
@@ -1052,6 +1092,10 @@ class AnkiImportInterface:
                 self.book_log(f"   📎 PDF segmentado creado para {sec_data['title']}")
             
             self._update_book_section_info(last_section)
+            
+        # Forzar actualización de todas las secciones para recalcular solapamientos correctos
+        for sec in self.book_sections:
+            self._update_book_section_info(sec)
                 
         self.book_log(f"✅ Se han creado {len(sections)} secciones con PDF fiel e imágenes de previsualización.")
         self._save_current_book_session()
@@ -1149,6 +1193,7 @@ class AnkiImportInterface:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         book_name = "".join(x for x in os.path.splitext(os.path.basename(pdf_path))[0] if x.isalnum() or x in "._- ")
         output_dir = os.path.join("temp_books", f"{book_name}_{timestamp}")
+        self.current_book_session = output_dir
         
         old_callback = self.document_processor.log_callback
         self.document_processor.log_callback = self.book_log
@@ -1353,17 +1398,68 @@ class AnkiImportInterface:
         count = len(section.images)
         widgets["info_label"].config(text=f"📄 {count} páginas/imágenes")
         
-        # Actualizar thumbnails (primeras 5 para no saturar)
+        # Actualizar thumbnails
         for child in widgets["thumbnails_frame"].winfo_children():
             child.destroy()
             
-        for i, img_data in enumerate(section.images[:10]): # Mostrar hasta 10 thumbnails
+        # Contar frecuencia de páginas en toda la sesión actual para detectar solapamientos
+        from collections import Counter
+        page_counts = Counter()
+        for sec in self.book_sections:
+            for img in sec.images:
+                p_num = img.get("page_number")
+                if p_num is not None:
+                    page_counts[p_num] += 1
+            
+        for i, img_data in enumerate(section.images):
             if "thumbnail_tk" not in img_data:
                 from PIL import ImageTk
                 img_data["thumbnail_tk"] = ImageTk.PhotoImage(img_data["thumbnail"])
             
-            lbl = tk.Label(widgets["thumbnails_frame"], image=img_data["thumbnail_tk"])
-            lbl.grid(row=0, column=i, padx=2)
+            # Envoltura de rejilla cada 10 columnas
+            row_idx = i // 10
+            col_idx = i % 10
+            
+            # Crear celda para imagen y número de página
+            p_num = img_data.get("page_number")
+            is_overlap = p_num is not None and page_counts[p_num] > 1
+            
+            cell_frame = tk.Frame(widgets["thumbnails_frame"], bg="white", padx=2, pady=2)
+            cell_frame.grid(row=row_idx, column=col_idx, padx=4, pady=4)
+            
+            lbl = tk.Label(cell_frame, image=img_data["thumbnail_tk"], bg="white")
+            lbl.pack()
+            
+            p_text = f"Pág. {p_num}" if p_num is not None else "Pág. ?"
+            if is_overlap:
+                p_text += " 🔄"
+                cell_frame.config(bg="#FFF3E0", bd=1, relief="solid") # soft orange highlight
+                lbl.config(bg="#FFF3E0")
+                lbl_txt = tk.Label(cell_frame, text=p_text, font=("Segoe UI", 8, "bold"), fg="#E65100", bg="#FFF3E0")
+            else:
+                lbl_txt = tk.Label(cell_frame, text=p_text, font=("Segoe UI", 8), fg="gray", bg="white")
+                
+            lbl_txt.pack()
+
+    def _update_book_section_status(self, section_id: int, card_type: str, success: bool, count: int):
+        """Actualiza el indicador visual de estado de una sección de libro."""
+        widgets = self.book_section_widgets.get(section_id)
+        if not widgets or "status_labels" not in widgets:
+            return
+        
+        status_labels = widgets["status_labels"]
+        if card_type not in status_labels:
+            return
+        
+        state_label = status_labels[card_type]["state"]
+        count_label = status_labels[card_type]["count"]
+        
+        if success:
+            state_label.config(text="✅", fg="green")
+            count_label.config(text=str(count))
+        else:
+            state_label.config(text="❌", fg="red")
+            count_label.config(text="")
 
     def delete_book_section(self, section):
         if section in self.book_sections:
@@ -1372,6 +1468,10 @@ class AnkiImportInterface:
                 widgets["frame"].destroy()
             self.book_sections.remove(section)
             self.book_log(f"🗑 Sección {section.section_id} eliminada")
+            
+            # Recalcular solapamientos para todas las secciones restantes
+            for sec in self.book_sections:
+                self._update_book_section_info(sec)
 
     def clear_all_book_sections(self):
         for widgets in self.book_section_widgets.values():
@@ -1477,10 +1577,14 @@ class AnkiImportInterface:
             # Evita la capa de extracción de texto y manda el PDF directamente a las APIs de flashcards
             if selected_mode == "Extracción Cruda (Fiel al documento)" and hasattr(section, 'pdf_segment_path') and os.path.exists(section.pdf_segment_path):
                 self.book_log(f"🚀 INICIANDO GENERACIÓN MULTIMODAL DIRECTA PARA {section.title}...")
-                multimodal_flashcards = self.flashcard_generator.generate_all_flashcards_multimodal(section.pdf_segment_path)
+                multimodal_flashcards = self.flashcard_generator.generate_all_flashcards_multimodal(section.pdf_segment_path, extraction_mode=1)
                 
-                # No extraemos texto extra para ahorrar tokens/tiempo, ya que es "Cruda"
-                content_to_process = "[Extracción Multimodal Directa - Archivo crudo sin OCR intermedio]"
+                # Intentar recuperar el texto extraído durante el proceso
+                extracted_text = multimodal_flashcards.pop("_extracted_text", "") if multimodal_flashcards else ""
+                if extracted_text:
+                    content_to_process = extracted_text
+                else:
+                    content_to_process = "[Extracción Multimodal Directa - Archivo crudo sin OCR intermedio]"
             
             else:
                 # FLUJO ESTÁNDAR (Extraer texto -> Generar desde texto)
@@ -1506,14 +1610,15 @@ class AnkiImportInterface:
                 return
 
             # [NUEVO] Determinar carpeta de guardado técnica para 'libros' respetando jerarquía
-            bisabuelo = self.great_grandparent_deck.get().strip()
-            grandparent = self.grandparent_deck.get().strip()
+            bisabuelo = clean_path_component(self.great_grandparent_deck.get())
+            grandparent = clean_path_component(self.grandparent_deck.get())
             
             book_full_path = self.book_path_var.get().strip()
             book_filename = "Libro_General"
             if book_full_path:
-                book_filename = os.path.splitext(os.path.basename(book_full_path))[0]
-                book_filename = "".join(x for x in book_filename if x.isalnum() or x in "._- ").strip()
+                book_filename = clean_path_component(os.path.splitext(os.path.basename(book_full_path))[0])
+                if not book_filename:
+                    book_filename = "Libro_General"
             
             # Construir la ruta base: MASTER_FOLDER / libros / bisabuelo / abuelo / book_filename
             path_parts = [MASTER_FOLDER, "libros"]
@@ -1526,22 +1631,43 @@ class AnkiImportInterface:
             libros_root = os.path.join(*path_parts)
             os.makedirs(libros_root, exist_ok=True)
 
-            # Apuntes expertos (Solo si se seleccionó "Estructuración Completa")
-            if selected_mode == "Estructuración Completa":
-                self.book_log(f"✨ Optimizando apuntes expertos para {section.title}...")
-                content_to_process = self.flashcard_generator.structure_content_expert(content_to_process)
+            # Transcripción 100% Fiel (Solo si se seleccionó "Transcripción 100% Fiel")
+            if selected_mode == "Transcripción 100% Fiel":
+                self.book_log(f"✨ Realizando transcripción 100% fiel para {section.title}...")
+                content_to_process = self.flashcard_generator.transcribe_content_faithful(content_to_process)
 
-            # [NUEVO] Guardar Apuntes Expertos en subcarpeta
-            expert_notes_dir = os.path.join(libros_root, "expert_notes")
+            # [NUEVO] Guardar transcripciones / apuntes en subcarpeta
+            safe_section_title = clean_path_component(section.title) or f"Seccion_{section.section_id}"
+            if selected_mode == "Transcripción 100% Fiel":
+                folder_name = "transcripciones_fieles"
+                file_suffix = "_Transcripcion_Fiel.md"
+                log_label = "Transcripción fiel"
+            else:
+                folder_name = "expert_notes"
+                file_suffix = "_Expert_Notes.md"
+                log_label = "Apuntes"
+
+            expert_notes_dir = os.path.join(libros_root, folder_name)
             os.makedirs(expert_notes_dir, exist_ok=True)
-            safe_section_title = "".join(c for c in section.title if c.isalnum() or c in " -_").strip()
-            expert_save_path = os.path.join(expert_notes_dir, f"{safe_section_title}_Expert_Notes.md")
+            expert_save_path = os.path.join(expert_notes_dir, f"{safe_section_title}{file_suffix}")
             try:
                 with open(expert_save_path, 'w', encoding='utf-8') as f:
                     f.write(content_to_process)
-                self.book_log(f"   💾 Apuntes guardados en: {os.path.relpath(expert_notes_dir, MASTER_FOLDER)}")
+                self.book_log(f"   💾 {log_label} guardados en: {os.path.relpath(expert_notes_dir, MASTER_FOLDER)}")
             except Exception as e:
-                self.book_log(f"   ⚠️ Error guardando apuntes: {e}")
+                self.book_log(f"   ⚠️ Error guardando {log_label.lower()}: {e}")
+
+            # Guardar también en la sección para que la ventana de evaluación lo detecte como fuente de consulta
+            section.transcription_text = content_to_process
+            if getattr(self, 'current_book_session', None):
+                chunks_dir = os.path.join(self.current_book_session, "chunks")
+                os.makedirs(chunks_dir, exist_ok=True)
+                chunk_file = os.path.join(chunks_dir, f"segment_{section.section_id:03d}.txt")
+                try:
+                    with open(chunk_file, 'w', encoding='utf-8') as f:
+                        f.write(content_to_process)
+                except Exception as e:
+                    self.book_log(f"   ⚠️ Error guardando transcripción en disco: {e}")
 
             # Generación de tarjetas (Selecciona flujo multimodal o estándar)
             if multimodal_flashcards:
@@ -5068,7 +5194,8 @@ class AnkiImportInterface:
                     "section_id": section.section_id,
                     "images": [img["path"] for img in section.images],
                     "pdf_segment_path": getattr(section, 'pdf_segment_path', None),
-                    "text": getattr(section, 'text', None)
+                    "text": getattr(section, 'text', None),
+                    "transcription_text": getattr(section, 'transcription_text', None)
                 }
                 session_data["sections"].append(section_info)
                 
@@ -5728,6 +5855,7 @@ class AnkiImportInterface:
             "level_3_application": "Nivel 3 - Aplicación",
             "level_4_analysis": "Nivel 4 - Análisis",
             "atomic_extraction": "Extracción Atómica",
+            "high_performance_architect": "Alto Rendimiento",
             "exam_pareto": "Examen Pareto",
             "exam_faithful": "Examen Fiel",
         }
@@ -5750,97 +5878,106 @@ class AnkiImportInterface:
         loaded_count = 0
         loaded_files = 0
 
-        for fname in sorted(os.listdir(flashcards_dir)):
-            if not fname.endswith(".txt"):
-                continue
-
-            fpath = os.path.join(flashcards_dir, fname)
-            # Nombre esperado: "PARTE X_card_type.txt"  o  "PARTE X_card_type_multimodal.txt"
-            name_no_ext = fname[:-4]  # quitar .txt
-            
-            # Buscar el tipo de tarjeta buscando coincidencias al final del nombre
-            card_type = None
-            section_part = name_no_ext
-            
-            # Buscar primero con _multimodal
-            is_multimodal = False
-            temp_name = name_no_ext
-            if temp_name.endswith("_multimodal"):
-                is_multimodal = True
-                temp_name = temp_name[:-11]  # quitar _multimodal
-                
-            # Buscar la llave de type_labels que coincide al final
-            for possible_type in sorted(type_labels.keys(), key=len, reverse=True):
-                suffix = f"_{possible_type}"
-                if temp_name.endswith(suffix):
-                    card_type = possible_type
-                    section_part = temp_name[:-len(suffix)]
-                    break
-            
-            if not card_type:
-                # Fallback por si acaso
-                parts = name_no_ext.split("_", 1)
-                if len(parts) >= 2:
-                    section_part = parts[0].strip()
-                    type_suffix = parts[1].strip().replace("_multimodal", "")
-                    card_type = suffix_to_type.get(type_suffix, type_suffix)
-                else:
-                    continue
-            
-            label = type_labels.get(card_type, card_type.replace("_", " ").title())
-            
-            # Construir deck destino
-            deck_name = ""
-            if ggp: deck_name += f"{ggp}::"
-            if gp:  deck_name += f"{gp}::"
-            deck_name += f"{section_part}::{label}"
-
-            # Leer y parsear el TSV
-            try:
-                with open(fpath, 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                
-                if not content:
+        # Usar os.walk para buscar archivos de texto de forma recursiva (soporte para subcarpetas por tipo)
+        for root_dir, dirs, files in os.walk(flashcards_dir):
+            for fname in sorted(files):
+                if not fname.endswith(".txt"):
                     continue
 
-                flashcards = []
-                for line in content.split('\n'):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if '\t' in line:
-                        front, back = line.split('\t', 1)
-                        flashcards.append({"front": front.strip(), "back": back.strip()})
-
-                if flashcards:
-                    self.pending_flashcard_imports.append({
-                        "deck_name": deck_name,
-                        "card_type": card_type,
-                        "flashcards": flashcards
-                    })
-                    loaded_count += len(flashcards)
-                    loaded_files += 1
+                fpath = os.path.join(root_dir, fname)
+                name_no_ext = fname[:-4]  # quitar .txt
+                
+                # Buscar el tipo de tarjeta buscando coincidencias al final del nombre
+                card_type = None
+                section_part = name_no_ext
+                
+                # Buscar primero con _multimodal
+                is_multimodal = False
+                temp_name = name_no_ext
+                if temp_name.endswith("_multimodal"):
+                    is_multimodal = True
+                    temp_name = temp_name[:-11]  # quitar _multimodal
                     
-                    # Actualizar indicador visual de estado en la interfaz si aplica
-                    if self.current_mode == "automatic_text":
-                        sec_title_clean = section_part.lower().strip()
-                        for section in self.text_sections:
-                            safe_sec_title = "".join(c for c in section.title if c.isalnum() or c in " -_").strip().lower()
-                            if safe_sec_title == sec_title_clean:
-                                self.root.after(0, lambda sid=section.section_id, ct=card_type, c=len(flashcards): 
-                                              self._update_text_section_status(sid, ct, True, c))
-                                break
-                    elif self.current_mode == "automatic_videos":
-                        sec_title_clean = section_part.lower().strip()
-                        for section in self.video_sections:
-                            safe_sec_title = "".join(c for c in section.title if c.isalnum() or c in " -_").strip().lower()
-                            if safe_sec_title == sec_title_clean:
-                                self.root.after(0, lambda sid=section.section_id, ct=card_type, c=len(flashcards): 
-                                              self._update_video_section_status(sid, ct, True, c))
-                                break
+                # Buscar la llave de type_labels que coincide al final
+                for possible_type in sorted(type_labels.keys(), key=len, reverse=True):
+                    suffix = f"_{possible_type}"
+                    if temp_name.endswith(suffix):
+                        card_type = possible_type
+                        section_part = temp_name[:-len(suffix)]
+                        break
+                
+                if not card_type:
+                    # Fallback por si acaso
+                    parts = name_no_ext.split("_", 1)
+                    if len(parts) >= 2:
+                        section_part = parts[0].strip()
+                        type_suffix = parts[1].strip().replace("_multimodal", "")
+                        card_type = suffix_to_type.get(type_suffix, type_suffix)
+                    else:
+                        continue
+                
+                label = type_labels.get(card_type, card_type.replace("_", " ").title())
+                
+                # Construir deck destino
+                deck_name = ""
+                if ggp: deck_name += f"{ggp}::"
+                if gp:  deck_name += f"{gp}::"
+                deck_name += f"{section_part}::{label}"
 
-            except Exception as e:
-                self._mode_log(f"   ⚠️ Error leyendo {fname}: {e}")
+                # Leer y parsear el TSV
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                    
+                    if not content:
+                        continue
+
+                    flashcards = []
+                    for line in content.split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if '\t' in line:
+                            front, back = line.split('\t', 1)
+                            flashcards.append({"front": front.strip(), "back": back.strip()})
+
+                    if flashcards:
+                        self.pending_flashcard_imports.append({
+                            "deck_name": deck_name,
+                            "card_type": card_type,
+                            "flashcards": flashcards
+                        })
+                        loaded_count += len(flashcards)
+                        loaded_files += 1
+                        
+                        # Actualizar indicador visual de estado en la interfaz si aplica
+                        if self.current_mode == "automatic_text":
+                            sec_title_clean = section_part.lower().strip()
+                            for section in self.text_sections:
+                                safe_sec_title = "".join(c for c in section.title if c.isalnum() or c in " -_").strip().lower()
+                                if safe_sec_title == sec_title_clean:
+                                    self.root.after(0, lambda sid=section.section_id, ct=card_type, c=len(flashcards): 
+                                                  self._update_text_section_status(sid, ct, True, c))
+                                    break
+                        elif self.current_mode == "automatic_videos":
+                            sec_title_clean = section_part.lower().strip()
+                            for section in self.video_sections:
+                                safe_sec_title = "".join(c for c in section.title if c.isalnum() or c in " -_").strip().lower()
+                                if safe_sec_title == sec_title_clean:
+                                    self.root.after(0, lambda sid=section.section_id, ct=card_type, c=len(flashcards): 
+                                                  self._update_video_section_status(sid, ct, True, c))
+                                    break
+                        elif self.current_mode == "automatic_books":
+                            sec_title_clean = section_part.lower().strip()
+                            for section in self.book_sections:
+                                safe_sec_title = "".join(c for c in section.title if c.isalnum() or c in " -_").strip().lower()
+                                if safe_sec_title == sec_title_clean:
+                                    self.root.after(0, lambda sid=section.section_id, ct=card_type, c=len(flashcards): 
+                                                  self._update_book_section_status(sid, ct, True, c))
+                                    break
+
+                except Exception as e:
+                    self._mode_log(f"   ⚠️ Error leyendo {fname}: {e}")
 
         if loaded_files > 0:
             self._mode_log(f"   📋 {loaded_count} flashcards de sesión anterior cargadas en Sala de Espera ({loaded_files} archivos).")
@@ -5978,14 +6115,11 @@ class AnkiImportInterface:
             ttk.Button(frame, text="Recuperar", command=lambda idx=i: select_session(idx)).pack(side="right", padx=5)
 
     def recover_book_session(self, session_data):
-        """Recupera la sesión de libro cargando sus secciones."""
+        """Recupera la sesión de libro cargando sus secciones y flashcards."""
         self.clear_all_book_sections()
         
-        # Limpiar cola de pendientes al recuperar sesión de libro
+        # Limpiar la cola de pendientes al iniciar la recuperación para no acumular de otras sesiones
         self.pending_flashcard_imports = []
-        self._save_pending_queue()
-        self._update_pending_button()
-        self.book_log("🗑️ Sala de espera limpiada al recuperar una sesión de libro.")
         
         self.great_grandparent_deck.set(session_data.get("great_grandparent", ""))
         self.grandparent_deck.set(session_data.get("grandparent", ""))
@@ -5999,6 +6133,7 @@ class AnkiImportInterface:
             section.title = sec_data["title"]
             section.pdf_segment_path = sec_data.get("pdf_segment_path")
             section.text = sec_data.get("text")
+            section.transcription_text = sec_data.get("transcription_text")
             
             # Recuperar imágenes (thumbnails)
             for img_path in sec_data.get("images", []):
@@ -6010,7 +6145,42 @@ class AnkiImportInterface:
             self._update_book_section_info(section)
             recovered_count += 1
             
+        # Forzar actualización de todas las secciones para recalcular solapamientos correctos
+        for sec in self.book_sections:
+            self._update_book_section_info(sec)
+            
+        if recovered_count > 0:
+            first_sec = self.book_sections[0]
+            if getattr(first_sec, 'pdf_segment_path', None):
+                self.current_book_session = os.path.dirname(first_sec.pdf_segment_path)
+                
         self.book_log(f"📂 Recuperada sesión con {recovered_count} secciones.")
+        
+        # Reconstruir la ruta base: MASTER_FOLDER / libros / bisabuelo / abuelo / book_filename
+        bisabuelo = clean_path_component(session_data.get("great_grandparent", ""))
+        grandparent = clean_path_component(session_data.get("grandparent", ""))
+        book_full_path = session_data.get("book_path", "").strip()
+        
+        book_filename = "Libro_General"
+        if book_full_path:
+            book_filename = clean_path_component(os.path.splitext(os.path.basename(book_full_path))[0])
+            if not book_filename:
+                book_filename = "Libro_General"
+            
+        path_parts = [MASTER_FOLDER, "libros"]
+        if bisabuelo:
+            path_parts.append(bisabuelo)
+        if grandparent:
+            path_parts.append(grandparent)
+        path_parts.append(book_filename)
+        
+        libros_root = os.path.join(*path_parts)
+        
+        # Cargar las flashcards generadas de la sesión anterior
+        self._load_flashcards_from_session(libros_root, session_data)
+        self._save_pending_queue()
+        self._update_pending_button()
+        
         # Actualizar canvas
         self.book_sections_canvas.configure(scrollregion=self.book_sections_canvas.bbox("all"))
 

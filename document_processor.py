@@ -145,6 +145,10 @@ class DocumentProcessor:
         total_pages = len(pages)
         start = 0
         
+        # Proteger contra solape inválido (solape no puede ser >= páginas por sección)
+        effective_overlap = min(overlap, pages_per_section - 1)
+        effective_overlap = max(0, effective_overlap)
+        
         while start < total_pages:
             end = min(start + pages_per_section, total_pages)
             group = pages[start:end]
@@ -171,10 +175,11 @@ class DocumentProcessor:
             if end >= total_pages:
                 break
                 
-            # Avanzar respetando el solape
-            start = end - overlap
+            # Avanzar respetando el solape efectivo
+            start = end - effective_overlap
             if start <= (end - pages_per_section):
-                start = end + 1
+                # Fallback seguro para evitar bucles infinitos
+                start = end
                 
         return sections
 

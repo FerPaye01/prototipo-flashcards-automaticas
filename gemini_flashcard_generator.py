@@ -35,6 +35,19 @@ MASTER_FOLDER = "Flashcards Programa"
 # Mínimo de caracteres para considerar que hay contenido educativo real
 MIN_CONTENT_CHARS = 300
 
+
+def _safe_filename(name: str, fallback: str = "sin_titulo") -> str:
+    """Sanitiza una cadena para uso como nombre de archivo/carpeta en Windows.
+    Reemplaza saltos de línea, elimina caracteres prohibidos y limita la longitud."""
+    if not name:
+        return fallback
+    name = name.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    name = re.sub(r'[<>:"/\\|?*]', '', name)
+    name = " ".join(name.split())
+    if len(name) > 120:
+        name = name[:117] + "..."
+    return name.strip() or fallback
+
 class GeminiFlashcardGenerator:
     """Generador avanzado con soporte Multimodal y Evaluación QYI."""
     
@@ -44,6 +57,21 @@ class GeminiFlashcardGenerator:
     ESTÁ ESTRICTAMENTE PROHIBIDO SIMPLIFICAR O RESUMIR; no debes perder información sin importar qué tan largo sea el texto. Debes recuperar hasta el último detalle técnico válido.
     ADICIONALMENTE: Si detectas fragmentos de CÓDIGO o ESPECIFICACIONES TÉCNICAS, debes recrearlos ÍNTEGRAMENTE sin modificar ni una sola línea de sintaxis. Si es una tabla, reconsrúyela en formato Markdown.
     Devuelve solo el texto extraído y enriquecido, estructurado en Markdown limpio."""
+    
+    FAITHFUL_BOOK_PROMPT = """Actúa como un transcriptor y asistente académico de precisión quirúrgica.
+    Tu única tarea es transcribir fielmente y al 100% el contenido del documento proporcionado, sin resumir, sin parafrasear destructivamente, sin omitir y sin agregar comentarios personales u observaciones.
+
+    INSTRUCCIONES DETALLADAS DE TRANSCRIPCIÓN:
+    1. FIDELIDAD ABSOLUTA DEL TEXTO: Recupera todo el contenido escrito, explicaciones, ejemplos, definiciones y detalles técnicos verbatim (tal y como están escritos). No resumas capítulos ni simplifiques las ideas.
+    2. ESTRUCTURA Y COMPAGINACIÓN: Usa formato Markdown (encabezados, listas con viñetas, tablas) para mantener la estructura jerárquica original del documento. Si hay tablas de datos, recréalas tal cual usando tablas de Markdown.
+    3. CÓDIGO Y COMANDOS: Si aparecen fragmentos de código, comandos de consola o especificaciones de software, recréalos ÍNTEGRAMENTE en bloques de código markdown con su sintaxis correspondiente.
+    4. FÓRMULAS Y SÍMBOLOS: Transcribe íntegramente las fórmulas matemáticas, ecuaciones y símbolos especiales sin omitir ningún operando.
+    5. ELEMENTOS VISUALES: Si se describen imágenes, diagramas de flujo o esquemas, genera una descripción objetiva y detallada del diagrama para que no se pierda la información explicativa asociada.
+
+    REGLAS ESTRICTAS:
+    - MANTÉN la fidelidad del texto original al 100%.
+    - PROHIBIDO agregar comentarios, anotaciones de estudio o resúmenes de nivel conceptual.
+    - Escribe en español con excelente ortografía."""
     
     TYPE_TO_API_INDEX = {
         "basic": 1, "multiple_choice": 2, "cloze": 3, "vocabulary": 4,
@@ -532,7 +560,7 @@ class GeminiFlashcardGenerator:
     def _save_ocr_transcript(self, text: str, session_path: str, title: str, subfolder: str = "ocr_transcripts"):
         folder = os.path.join(session_path, subfolder)
         os.makedirs(folder, exist_ok=True)
-        safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()
+        safe_title = _safe_filename(title)
         path = os.path.join(folder, f"{safe_title}.txt")
         try:
             with open(path, 'w', encoding='utf-8') as f:
@@ -543,7 +571,7 @@ class GeminiFlashcardGenerator:
     def _save_flashcards_tsv(self, tsv: str, session_path: str, title: str, card_type: str):
         folder = os.path.join(session_path, "flashcards")
         os.makedirs(folder, exist_ok=True)
-        safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()
+        safe_title = _safe_filename(title)
         path = os.path.join(folder, f"{safe_title}_{card_type}.txt")
         try:
             with open(path, 'w', encoding='utf-8') as f:
@@ -682,6 +710,16 @@ class GeminiFlashcardGenerator:
             self._log(f"❌ Error al extraer texto del PDF: {e}")
             return ""
 
+    def transcribe_content_faithful(self, text: str) -> str:
+        """Transcribe de forma 100% fiel el contenido de un libro/documento."""
+        self._log("🔊 Transcribiendo contenido de forma 100% fiel con Gemini...")
+        prompt = f"{self.FAITHFUL_BOOK_PROMPT}\n\nCONTENIDO A TRANSCRIBIR:\n{text}"
+        try:
+            return self.generate_raw_response(prompt)
+        except Exception as e:
+            self._log(f"❌ Error en transcripción fiel: {e}")
+            return text
+
     def structure_content_expert(self, text: str) -> str:
         """Optimiza y estructura el texto en apuntes de estudio exhaustivos."""
         self._log("✨ Optimizando apuntes expertos con Gemini...")
@@ -726,14 +764,17 @@ class GeminiFlashcardGenerator:
             self._log(f"❌ Error analizando secciones semánticas: {e}")
         return []
 
-    def generate_all_flashcards_multimodal(self, pdf_segment_path: str) -> Dict[str, Any]:
+    def generate_all_flashcards_multimodal(self, pdf_segment_path: str, extraction_mode: int = 2) -> Dict[str, Any]:
         """Genera flashcards directamente a partir de un fragmento de PDF."""
-        self._log(f"🎬 Generando flashcards multimodales directas de PDF: {os.path.basename(pdf_segment_path)}")
+        self._log(f"🎬 Generando flashcards multimodales directas de PDF: {os.path.basename(pdf_segment_path)} (Extracción: {extraction_mode})")
         try:
-            text = self.extract_text_from_pdf_file(pdf_segment_path, extraction_mode=2)
+            text = self.extract_text_from_pdf_file(pdf_segment_path, extraction_mode=extraction_mode)
             if not text:
                 return {"success": False, "error": "No se pudo extraer texto del PDF para generación"}
-            return self.generate_all_flashcards_parallel(text)
+            results = self.generate_all_flashcards_parallel(text)
+            if isinstance(results, dict):
+                results["_extracted_text"] = text
+            return results
         except Exception as e:
             self._log(f"❌ Error en generación multimodal de PDF: {e}")
             return {}

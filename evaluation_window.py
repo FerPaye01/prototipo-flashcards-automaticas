@@ -277,13 +277,15 @@ class EvaluationUI(tk.Toplevel):
         if not self.app:
             return
             
-        # 1. Caso: Hay segmentos de video o audio con transcripciones que se pueden reconstruir
+        # 1. Caso: Hay segmentos de video, audio o secciones de libro con transcripciones que se pueden reconstruir
         mode = getattr(self.app, 'current_mode', '')
         segments = []
         if mode == "automatic_videos":
             segments = getattr(self.app, 'current_video_segments', [])
         elif mode == "automatic_audio":
             segments = getattr(self.app, 'current_audio_segments', [])
+        elif mode == "automatic_books":
+            segments = getattr(self.app, 'book_sections', [])
             
         segments_with_trans = [s for s in segments if getattr(s, 'transcription_text', '')]
         
@@ -333,8 +335,10 @@ class EvaluationUI(tk.Toplevel):
             segments = getattr(self.app, 'current_video_segments', [])
         elif mode == "automatic_audio":
             segments = getattr(self.app, 'current_audio_segments', [])
+        elif mode == "automatic_books":
+            segments = getattr(self.app, 'book_sections', [])
             
-        segments_with_trans = sorted([s for s in segments if getattr(s, 'transcription_text', '')], key=lambda x: getattr(x, 'segment_id', 0))
+        segments_with_trans = sorted([s for s in segments if getattr(s, 'transcription_text', '')], key=lambda x: getattr(x, 'segment_id', getattr(x, 'section_id', 0)))
         
         if not segments_with_trans:
             messagebox.showwarning("Error", "No se encontraron transcripciones de segmentos para unificar.")
@@ -343,9 +347,9 @@ class EvaluationUI(tk.Toplevel):
         # Concatenar
         reconstructed = []
         for s in segments_with_trans:
-            sid = getattr(s, 'segment_id', 0)
+            sid = getattr(s, 'segment_id', getattr(s, 'section_id', 0))
             text = getattr(s, 'transcription_text', '').strip()
-            reconstructed.append(f"--- Segmento {sid} ---\n{text}")
+            reconstructed.append(f"--- Segmento/Sección {sid} ---\n{text}")
             
         full_text = "\n\n".join(reconstructed)
         self.app.current_source_context = full_text
@@ -356,6 +360,8 @@ class EvaluationUI(tk.Toplevel):
             session_dir = getattr(self.app, 'current_video_session', None)
         elif mode == "automatic_audio":
             session_dir = getattr(self.app, 'current_audio_session', None)
+        elif mode == "automatic_books":
+            session_dir = getattr(self.app, 'current_book_session', None)
             
         if session_dir and os.path.isdir(session_dir):
             try:
@@ -374,27 +380,155 @@ class EvaluationUI(tk.Toplevel):
         messagebox.showinfo("Unificación Exitosa", f"Se han unificado {len(segments_with_trans)} segmentos en una sola fuente de consulta de {char_count:,} caracteres.")
 
     def _load_manual_txt_source(self):
-        """Permite cargar un archivo de texto manual como fuente de consulta."""
+        """Permite cargar un archivo de texto, PDF o Word como fuente de consulta."""
         from tkinter import filedialog
         file_path = filedialog.askopenfilename(
-            title="Seleccionar archivo de texto fuente",
-            filetypes=[("Archivos de texto", "*.txt"), ("Todos los archivos", "*.*")]
+            title="Seleccionar archivo fuente (TXT, PDF, Word)",
+            filetypes=[
+                ("Archivos Soportados", "*.txt;*.pdf;*.docx"),
+                ("Archivos de texto", "*.txt"),
+                ("Archivos PDF", "*.pdf"),
+                ("Archivos Word", "*.docx"),
+                ("Todos los archivos", "*.*")
+            ]
         )
-        if file_path:
+        if not file_path:
+            return
+
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        if ext == ".txt":
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
-                if not content:
-                    messagebox.showwarning("Archivo Vacío", "El archivo seleccionado está vacío.")
-                    return
-                if self.app:
-                    self.app.current_source_context = content
+                self._set_source_context(content, f"TXT ({os.path.basename(file_path)})")
+            except UnicodeDecodeError:
+                # Fallback a latin-1 si falla UTF-8
+                try:
+                    with open(file_path, 'r', encoding='latin-1') as f:
+                        content = f.read().strip()
+                    self._set_source_context(content, f"TXT ({os.path.basename(file_path)})")
+                except Exception as e:
+                    messagebox.showerror("Error", f"No se pudo leer el archivo de texto:\n{e}")
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo leer el archivo de texto:\n{e}")
                 
-                char_count = len(content)
-                self.lbl_source_status.config(text="✅ Fuente cargada desde TXT", foreground="green")
-                self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres cargada desde {os.path.basename(file_path)}.", foreground="black")
+        elif ext == ".docx":
+            try:
+                from docx import Document
+                doc = Document(file_path)
+                content = "\n".join([p.text for p in doc.paragraphs]).strip()
+                if not content:
+                    messagebox.showwarning("Archivo Vacío", "El archivo Word no contiene texto.")
+                    return
+                self._set_source_context(content, f"Word ({os.path.basename(file_path)})")
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo leer el archivo Word:\n{e}")
+                
+        elif ext == ".pdf":
+            # Extraer texto rápido primero
+            try:
+                import fitz
+                doc = fitz.open(file_path)
+                text_list = []
+                for page in doc:
+                    text_list.append(page.get_text())
+                doc.close()
+                raw_text = "\n".join(text_list).strip()
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo abrir el PDF:\n{e}")
+                return
+
+            if len(raw_text) < 100:
+                # Parece escaneado
+                resp = messagebox.askyesno(
+                    "PDF Escaneado",
+                    "El PDF no contiene texto seleccionable (parece ser escaneado o imágenes).\n\n"
+                    "¿Deseas transcribir el PDF completo usando la IA de Gemini (Vision OCR)?\n"
+                    "Esto puede tardar unos minutos."
+                )
+                if resp:
+                    self._extract_pdf_with_ia_thread(file_path, force_ocr=True)
+                else:
+                    messagebox.showinfo("Cancelado", "No se cargó ninguna fuente de consulta.")
+            else:
+                # Contiene texto seleccionable
+                resp = messagebox.askyesno(
+                    "Método de Extracción",
+                    "El PDF contiene texto digital seleccionable.\n\n"
+                    "¿Deseas procesarlo con Gemini Vision OCR para transcribir e integrar imágenes/diagramas?\n"
+                    "Presiona 'Sí' para usar Gemini (Lento).\n"
+                    "Presiona 'No' para extraer el texto digital de forma directa y local (Rápido)."
+                )
+                if resp:
+                    self._extract_pdf_with_ia_thread(file_path, force_ocr=True)
+                else:
+                    self._set_source_context(raw_text, f"PDF rápido ({os.path.basename(file_path)})")
+        else:
+            # Fallback general para otros archivos
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read().strip()
+                self._set_source_context(content, f"Archivo ({os.path.basename(file_path)})")
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo leer el archivo:\n{e}")
+
+    def _set_source_context(self, content: str, source_label: str):
+        if not content:
+            messagebox.showwarning("Archivo Vacío", "No se pudo obtener texto del archivo seleccionado.")
+            return
+            
+        if self.app:
+            self.app.current_source_context = content
+            
+        char_count = len(content)
+        self.lbl_source_status.config(text="✅ Fuente cargada", foreground="green")
+        self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres cargada desde {source_label}.", foreground="black")
+
+    def _extract_pdf_with_ia_thread(self, pdf_path: str, force_ocr: bool):
+        """Inicia un hilo en segundo plano para transcribir el PDF con Gemini."""
+        progress_win = tk.Toplevel(self)
+        progress_win.title("📄 Transcribiendo PDF con Gemini")
+        progress_win.geometry("450x180")
+        progress_win.resizable(False, False)
+        progress_win.grab_set()
+        
+        main_frame = ttk.Frame(progress_win, padding=20)
+        main_frame.pack(fill="both", expand=True)
+        
+        lbl_msg = ttk.Label(main_frame, text="Procesando archivo PDF con Gemini Vision OCR...\nEste proceso puede tomar un momento por página.", wrap=True)
+        lbl_msg.pack(fill="x", pady=(0, 10))
+        
+        pb = ttk.Progressbar(main_frame, mode="indeterminate")
+        pb.pack(fill="x", pady=10)
+        pb.start(10)
+        
+        def run_extraction():
+            try:
+                # Inicializar generador si no existe
+                if not self.app.flashcard_generator:
+                    active_config = self.app.config_manager.get_active_set()
+                    from gemini_flashcard_generator import GeminiFlashcardGenerator
+                    self.app.flashcard_generator = GeminiFlashcardGenerator(
+                        log_callback=self.app._mode_log,
+                        config_set=active_config
+                    )
+                
+                # Ejecutar extracción
+                extraction_mode = 2 if force_ocr else 1
+                text = self.app.flashcard_generator.extract_text_from_pdf_file(pdf_path, extraction_mode=extraction_mode)
+                
+                if text:
+                    self.after(0, lambda: self._set_source_context(text, f"Gemini OCR ({os.path.basename(pdf_path)})"))
+                    self.after(0, lambda: messagebox.showinfo("Éxito", f"Se ha extraído y cargado el contenido del PDF con Gemini correctamente."))
+                else:
+                    self.after(0, lambda: messagebox.showerror("Error", "No se pudo obtener texto del PDF usando Gemini."))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Error", f"Error durante la extracción de IA:\n{e}"))
+            finally:
+                self.after(0, progress_win.destroy)
+                
+        threading.Thread(target=run_extraction, daemon=True).start()
 
     def _start_evaluation(self):
         if not self.flat_flashcards:
@@ -886,9 +1020,11 @@ class EvaluationUI(tk.Toplevel):
             segments = getattr(self.app, 'current_video_segments', [])
         elif mode == "automatic_audio":
             segments = getattr(self.app, 'current_audio_segments', [])
+        elif mode == "automatic_books":
+            segments = getattr(self.app, 'book_sections', [])
             
         if not segments:
-            messagebox.showwarning("Sin segmentos", "No hay segmentos disponibles en la sesión actual.")
+            messagebox.showwarning("Sin segmentos", "No hay segmentos o secciones disponibles en la sesión actual.")
             return
             
         # Abrir ventana de progreso
@@ -924,48 +1060,79 @@ class TranscriptionProgressUI(tk.Toplevel):
         prompt_frame = ttk.LabelFrame(main_frame, text="Configuración del Prompt de Transcripción")
         prompt_frame.pack(fill="x", pady=(0, 10))
         
-        # Determinar el prompt por defecto según el primer segmento
-        is_audio = False
-        if self.segments:
-            path = self.segments[0].audio_path or ''
-            is_audio = path.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus'))
-            
-        default_prompt = (
-            self.app.video_processor.DEFAULT_SEGMENT_AUDIO_PROMPT 
-            if is_audio else 
-            self.app.video_processor.DEFAULT_SEGMENT_VIDEO_PROMPT
-        )
-        
+        # Determinar el prompt por defecto según el modo y primer segmento
+        mode = getattr(self.app, 'current_mode', '')
+        if mode == "automatic_books":
+            default_prompt = (
+                "Actúa como un excelente estudiante universitario y asistente académico de alto rendimiento.\n"
+                "Tu tarea es transcribir y estructurar fielmente todo el contenido de este segmento del libro o documento (PDF/Word).\n\n"
+                "INSTRUCCIONES DE EXTRACCIÓN Y TRANSCRIPCIÓN:\n"
+                "1. EXTRACCIÓN DETALLADA: Recupera todo el contenido textual del documento, explicaciones, ejemplos y detalles técnicos. No resumas ni omitas información importante.\n"
+                "2. ESTRUCTURA Y FORMATO: Organiza la información usando encabezados Markdown, viñetas y tablas de manera clara y profesional.\n"
+                "3. ELEMENTOS GRÁFICOS Y FÓRMULAS: Describe diagramas, esquemas o imágenes si aparecen en la página. Transcribe íntegramente las fórmulas matemáticas y ecuaciones.\n"
+                "4. CÓDIGO Y ESPECIFICACIONES: Si aparecen fragmentos de código fuente, comandos o especificaciones, recréalos íntegramente en bloques de código markdown.\n\n"
+                "REGLAS:\n"
+                "- NO simplifiques destructivamente; mantén la fidelidad del texto original.\n"
+                "- Escribe en español con excelente ortografía."
+            )
+            # Ajustar por defecto si la extracción en la ventana principal es Transcripción 100% Fiel
+            active_mode = ""
+            if hasattr(self.app, 'extraction_mode_book'):
+                active_mode = self.app.extraction_mode_book.get()
+
+            self.prompt_templates = {
+                "Transcripción y Extracción Detallada (Recomendado)": default_prompt,
+                "Apuntes de Estudiante Experto": (
+                    "Actúa como un estudiante de alto rendimiento. En lugar de una transcripción literal, redacta "
+                    "un resumen académico estructurado del segmento.\n"
+                    "Identifica y define los conceptos clave explicados, esquematiza las ideas principales "
+                    "y rescata cualquier fórmula, código o paso relevante de manera clara y organizada."
+                ),
+                "Transcripción 100% Fiel": self.app.flashcard_generator.FAITHFUL_BOOK_PROMPT
+            }
+
+            if active_mode == "Transcripción 100% Fiel":
+                default_prompt = self.app.flashcard_generator.FAITHFUL_BOOK_PROMPT
+        else:
+            is_audio = False
+            if self.segments:
+                path = getattr(self.segments[0], 'audio_path', '') or ''
+                is_audio = path.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a', '.ogg', '.opus'))
+                
+            default_prompt = (
+                self.app.video_processor.DEFAULT_SEGMENT_AUDIO_PROMPT 
+                if is_audio else 
+                self.app.video_processor.DEFAULT_SEGMENT_VIDEO_PROMPT
+            )
+            self.prompt_templates = {
+                "Multimodal Completo (Recomendado)": default_prompt,
+                "Literal y Estricto (Sin observaciones)": (
+                    "Transcribe fielmente todo el contenido de este segmento. Incluye:\n"
+                    "- Todo lo que se dice verbalmente (transcripción literal del audio, sin resumir).\n"
+                    "- Todo texto visible en pantalla (diapositivas, código fuente, títulos, subtítulos, anotaciones).\n"
+                    "- Descripción muy breve de esquemas o diagramas si aparecen.\n\n"
+                    "REGLAS:\n"
+                    "- NO resumas ni simplifiques.\n"
+                    "- NO agregues observaciones, interpretaciones ni apuntes de estudiante.\n"
+                    "- Escribe en español con la mejor ortografía."
+                ),
+                "Solo Audio / Transcripción Literal de Voz": (
+                    "Transcribe de forma literal y completa todo el audio del segmento. "
+                    "No agregues descripciones visuales ni apuntes de estudiante, solo reproduce el texto hablado "
+                    "exactamente como lo dice el ponente, palabra por palabra, sin omitir ni resumir nada."
+                ),
+                "Resumen y Conceptos Clave (Apuntes)": (
+                    "Actúa como un estudiante de alto rendimiento. En lugar de una transcripción literal, redacta "
+                    "un resumen académico estructurado del segmento. "
+                    "Identifica y define los conceptos clave explicados, esquematiza las ideas principales "
+                    "y rescata cualquier fórmula, código o paso relevante de manera clara y organizada."
+                )
+            }
         # Selector de Plantillas
         template_frame = ttk.Frame(prompt_frame)
         template_frame.pack(fill="x", padx=5, pady=5)
         
         ttk.Label(template_frame, text="Plantilla:").pack(side="left", padx=(0, 5))
-        
-        self.prompt_templates = {
-            "Multimodal Completo (Recomendado)": default_prompt,
-            "Literal y Estricto (Sin observaciones)": (
-                "Transcribe fielmente todo el contenido de este segmento. Incluye:\n"
-                "- Todo lo que se dice verbalmente (transcripción literal del audio, sin resumir).\n"
-                "- Todo texto visible en pantalla (diapositivas, código fuente, títulos, subtítulos, anotaciones).\n"
-                "- Descripción muy breve de esquemas o diagramas si aparecen.\n\n"
-                "REGLAS:\n"
-                "- NO resumas ni simplifiques.\n"
-                "- NO agregues observaciones, interpretaciones ni apuntes de estudiante.\n"
-                "- Escribe en español con la mejor ortografía."
-            ),
-            "Solo Audio / Transcripción Literal de Voz": (
-                "Transcribe de forma literal y completa todo el audio del segmento. "
-                "No agregues descripciones visuales ni apuntes de estudiante, solo reproduce el texto hablado "
-                "exactamente como lo dice el ponente, palabra por palabra, sin omitir ni resumir nada."
-            ),
-            "Resumen y Conceptos Clave (Apuntes)": (
-                "Actúa como un estudiante de alto rendimiento. En lugar de una transcripción literal, redacta "
-                "un resumen académico estructurado del segmento. "
-                "Identifica y define los conceptos clave explicados, esquematiza las ideas principales "
-                "y rescata cualquier fórmula, código o paso relevante de manera clara y organizada."
-            )
-        }
         
         self.combo_template = ttk.Combobox(
             template_frame, 
@@ -974,7 +1141,10 @@ class TranscriptionProgressUI(tk.Toplevel):
             width=40
         )
         self.combo_template.pack(side="left", fill="x", expand=True)
-        self.combo_template.set("Multimodal Completo (Recomendado)")
+        default_template_name = "Transcripción y Extracción Detallada (Recomendado)" if mode == "automatic_books" else "Multimodal Completo (Recomendado)"
+        if mode == "automatic_books" and hasattr(self.app, 'extraction_mode_book') and self.app.extraction_mode_book.get() == "Transcripción 100% Fiel":
+            default_template_name = "Transcripción 100% Fiel"
+        self.combo_template.set(default_template_name)
         self.combo_template.bind("<<ComboboxSelected>>", self._on_template_selected)
         
         self.prompt_text = tk.Text(prompt_frame, height=5, font=("Segoe UI", 9), wrap="word")
@@ -1072,7 +1242,15 @@ class TranscriptionProgressUI(tk.Toplevel):
                 session_dir = getattr(self.app, 'current_video_session', None)
             elif mode == "automatic_audio":
                 session_dir = getattr(self.app, 'current_audio_session', None)
+            elif mode == "automatic_books":
+                session_dir = getattr(self.app, 'current_book_session', None)
                 
+            if not session_dir and mode == "automatic_books" and self.segments:
+                first_seg = self.segments[0]
+                if getattr(first_seg, 'pdf_segment_path', None):
+                    session_dir = os.path.dirname(first_seg.pdf_segment_path)
+                    self.app.current_book_session = session_dir
+                    
             if not session_dir:
                 self.log("❌ Error: No se pudo identificar la carpeta de la sesión actual.")
                 return
@@ -1088,10 +1266,12 @@ class TranscriptionProgressUI(tk.Toplevel):
                     break
                     
                 self.after(0, lambda i=idx: self.progress.config(value=(i-1)/total * 100))
-                self.log(f"\n⚡ [{idx}/{total}] Procesando Segmento {segment.segment_id}...")
+                
+                sid = getattr(segment, 'segment_id', getattr(segment, 'section_id', 0))
+                self.log(f"\n⚡ [{idx}/{total}] Procesando Segmento/Sección {sid}...")
                 
                 # Verificar si ya tiene transcripción en memoria o en disco
-                chunk_file = os.path.join(chunks_dir, f"segment_{segment.segment_id:03d}.txt")
+                chunk_file = os.path.join(chunks_dir, f"segment_{sid:03d}.txt")
                 force_overwrite = self.check_force.get()
                 if not force_overwrite:
                     if os.path.exists(chunk_file) and not getattr(segment, 'transcription_text', ''):
@@ -1112,6 +1292,60 @@ class TranscriptionProgressUI(tk.Toplevel):
                         self.log(f"   ✓ Ya transcrito en memoria ({len(segment.transcription_text)} chars)")
                         transcribed_count += 1
                         continue
+                
+                # --- NUEVA RAMA PARA MODO LIBROS ---
+                if mode == "automatic_books":
+                    self.log(f"   ⬆ Extrayendo/estructurando texto para la sección {sid}...")
+                    try:
+                        text = ""
+                        # Caso A: Fragmento PDF
+                        if hasattr(segment, 'pdf_segment_path') and segment.pdf_segment_path and os.path.exists(segment.pdf_segment_path):
+                            # Obtener el modo de extracción
+                            selected_mode = "Apuntes de Estudiante Experto"
+                            if hasattr(self.app, 'extraction_mode_book'):
+                                selected_mode = self.app.extraction_mode_book.get()
+                            extraction_mode = 2 if selected_mode != "Extracción Cruda (Fiel al documento)" else 1
+                            
+                            text = self.app.flashcard_generator.extract_text_from_pdf_file(
+                                segment.pdf_segment_path, 
+                                extraction_mode=extraction_mode
+                            )
+                            # Usar prompt personalizado si existe
+                            custom_prompt = getattr(self, 'custom_prompt', None)
+                            if custom_prompt and custom_prompt.strip():
+                                self.log(f"   ✨ Aplicando prompt personalizado de extracción...")
+                                prompt = f"{custom_prompt}\n\nCONTENIDO A PROCESAR:\n{text}"
+                                text = self.app.flashcard_generator.generate_raw_response(prompt)
+                            elif selected_mode == "Transcripción 100% Fiel":
+                                self.log(f"   ✨ Realizando transcripción 100% fiel...")
+                                text = self.app.flashcard_generator.transcribe_content_faithful(text)
+                                
+                        # Caso B: Imágenes
+                        elif getattr(segment, 'images', []):
+                            image_paths = [img["path"] for img in segment.images]
+                            text = self.app.flashcard_generator.extract_text_from_images(image_paths)
+                            
+                        # Caso C: Texto
+                        elif hasattr(segment, 'text') and segment.text:
+                            text = segment.text
+                            
+                        if text:
+                            text = text.strip()
+                            segment.transcription_text = text
+                            segment.char_count = len(text)
+                            segment.transcription_path = chunk_file
+                            
+                            # Guardar incrementalmente en disco
+                            with open(chunk_file, 'w', encoding='utf-8') as f:
+                                f.write(text)
+                                
+                            self.log(f"   ✅ Éxito: {len(text):,} caracteres extraídos/transcritos.")
+                            transcribed_count += 1
+                        else:
+                            self.log(f"   ❌ Error: No se pudo extraer texto para esta sección.")
+                    except Exception as ex:
+                        self.log(f"   ❌ Error al extraer/transcribir: {ex}")
+                    continue
                 
                 # Transcribir con Gemini a través del video_processor
                 if not segment.audio_path or not os.path.exists(segment.audio_path):
