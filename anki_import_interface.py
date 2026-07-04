@@ -276,6 +276,7 @@ class AnkiImportInterface:
         self.automatic_videos_frame = None
         self.automatic_books_frame = None
         self.automatic_audio_frame = None
+        self.anki_translator_frame = None
         
         self.setup_ui()
         self.check_anki_status()
@@ -315,6 +316,28 @@ class AnkiImportInterface:
                         elif target == "book" and hasattr(self, 'book_logs_text'):
                             self.book_logs_text.insert(tk.END, formatted_msg)
                             self.book_logs_text.see(tk.END)
+                        elif target == "translator" and hasattr(self, 'translator_logs_text'):
+                            self.translator_logs_text.insert(tk.END, formatted_msg)
+                            self.translator_logs_text.see(tk.END)
+                
+                elif msg_type == "stats":
+                    if hasattr(self, 'stats_processed_var'):
+                        self.stats_processed_var.set(f"Tarjetas analizadas: {msg.get('processed', 0)}")
+                    if hasattr(self, 'stats_generated_var'):
+                        self.stats_generated_var.set(f"Tarjetas generadas/actualizadas: {msg.get('generated', 0)}")
+                    if hasattr(self, 'stats_skipped_var'):
+                        self.stats_skipped_var.set(f"Tarjetas omitidas: {msg.get('skipped', 0)}")
+                    if hasattr(self, 'stats_errors_var'):
+                        self.stats_errors_var.set(f"Errores encontrados: {msg.get('errors', 0)}")
+                
+                elif msg_type == "translation_finished":
+                    if hasattr(self, 'btn_start_translation'):
+                        self.btn_start_translation.config(state="normal")
+                    if hasattr(self, 'btn_stop_translation'):
+                        self.btn_stop_translation.config(state="disabled")
+                    if hasattr(self, 'translator_deck_tree'):
+                        self.translator_deck_tree.config(selectmode="browse")
+                    messagebox.showinfo("Adaptación Finalizada", msg.get("message", "El proceso ha terminado."))
                 
                 self.ui_queue.task_done()
         except queue.Empty:
@@ -335,6 +358,7 @@ class AnkiImportInterface:
         self.setup_automatic_videos_mode()
         self.setup_automatic_books_mode()
         self.setup_automatic_audio_mode()
+        self.setup_anki_translator_mode()
         
         # Mostrar modo normal por defecto
         self.show_normal_mode()
@@ -501,6 +525,10 @@ class AnkiImportInterface:
         self.auto_audio_btn = ttk.Button(header_frame, text="🎧 Modo Audio",
                                           command=self.show_automatic_audio_mode)
         self.auto_audio_btn.grid(row=0, column=5, sticky="e", padx=5)
+        
+        self.anki_translator_btn = ttk.Button(header_frame, text="🔄 Adaptar Anki",
+                                              command=self.show_anki_translator_mode)
+        self.anki_translator_btn.grid(row=0, column=6, sticky="e", padx=5)
         
         # Frame para el prefijo del deck
         prefix_frame = ttk.Frame(self.normal_frame)
@@ -1543,7 +1571,10 @@ class AnkiImportInterface:
             "atomic_extraction": "Extracción Atómica",
             "high_performance_architect": "Alto Rendimiento",
             "exam_pareto": "Examen Pareto",
-            "exam_faithful": "Examen Fiel"
+            "exam_faithful": "Examen Fiel",
+            "forensic_analyst": "Analista Forense",
+            "environment_architect": "Arquitecto del Entorno",
+            "speedrun_trainer": "Entrenador de Speedrun"
         }
         label = type_labels.get(card_type, card_type)
         if base_deck.endswith(f"::{label}"):
@@ -1707,7 +1738,10 @@ class AnkiImportInterface:
                         "atomic_extraction": "Extracción Atómica",
                         "high_performance_architect": "Alto Rendimiento",
                         "exam_pareto": "Examen Pareto",
-                        "exam_faithful": "Examen Fiel"
+                        "exam_faithful": "Examen Fiel",
+                        "forensic_analyst": "Analista Forense",
+                        "environment_architect": "Arquitecto del Entorno",
+                        "speedrun_trainer": "Entrenador de Speedrun"
                     }
                     
                     label = type_labels.get(card_type, card_type)
@@ -1823,6 +1857,8 @@ class AnkiImportInterface:
         if self.automatic_books_frame: self.automatic_books_frame.grid_forget()
         if hasattr(self, 'automatic_audio_frame') and self.automatic_audio_frame: 
             self.automatic_audio_frame.grid_forget()
+        if hasattr(self, 'anki_translator_frame') and self.anki_translator_frame:
+            self.anki_translator_frame.grid_forget()
     
     def setup_automatic_audio_mode(self):
         """Configura la vista del modo automático para audios."""
@@ -2068,6 +2104,469 @@ class AnkiImportInterface:
         self.audio_set_label = ttk.Label(bottom_frame, text=f"Set: {self.config_manager.active_set_name}", font=("Segoe UI", 9), foreground="blue")
         self.audio_set_label.pack(side="right", padx=10)
 
+    def show_anki_translator_mode(self):
+        """Muestra el frame del adaptador/traductor y recarga la lista de mazos."""
+        self._hide_all_frames()
+        self.anki_translator_frame.grid(row=0, column=0, sticky="nsew")
+        self.current_mode = "anki_translator"
+        self.refresh_deck_tree()
+
+    def setup_anki_translator_mode(self):
+        """Configura la vista del módulo adaptador/traductor de Anki."""
+        self.anki_translator_frame = ttk.Frame(self.root, padding="10")
+        self.anki_translator_frame.columnconfigure(0, weight=1)
+        self.anki_translator_frame.columnconfigure(1, weight=1)
+        self.anki_translator_frame.rowconfigure(1, weight=1)
+        
+        # Header con botón de retroceso
+        header_frame = ttk.Frame(self.anki_translator_frame)
+        header_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        header_frame.columnconfigure(1, weight=1)
+        
+        back_btn = ttk.Button(header_frame, text="← Volver", command=self.show_normal_mode)
+        back_btn.grid(row=0, column=0, sticky="w")
+        
+        title_label = ttk.Label(header_frame, text="🔄 Adaptador de Mazos de Anki (Adaptación Académica/Técnica)",
+                               font=("Arial", 14, "bold"))
+        title_label.grid(row=0, column=1, sticky="w", padx=20)
+        
+        # --- PANEL IZQUIERDO: Selección y Configuración ---
+        left_frame = ttk.LabelFrame(self.anki_translator_frame, text="📁 Selección de Mazo Raíz", padding="10")
+        left_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        left_frame.columnconfigure(0, weight=1)
+        left_frame.rowconfigure(1, weight=1)
+        
+        # Barra superior del panel izquierdo (Refrescar)
+        top_left_bar = ttk.Frame(left_frame)
+        top_left_bar.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        
+        ttk.Label(top_left_bar, text="Selecciona el mazo original:").pack(side="left", anchor="w")
+        refresh_btn = ttk.Button(top_left_bar, text="🔄 Recargar Mazos", command=self.refresh_deck_tree)
+        refresh_btn.pack(side="right", anchor="e")
+        
+        # Treeview de Mazos
+        self.translator_deck_tree = ttk.Treeview(left_frame, selectmode="browse", show="tree")
+        self.translator_deck_tree.grid(row=1, column=0, sticky="nsew")
+        
+        tree_scrollbar = ttk.Scrollbar(left_frame, orient="vertical", command=self.translator_deck_tree.yview)
+        tree_scrollbar.grid(row=1, column=1, sticky="ns")
+        self.translator_deck_tree.config(yscrollcommand=tree_scrollbar.set)
+        
+        # Panel de Opciones debajo del Treeview
+        options_frame = ttk.LabelFrame(left_frame, text="⚙️ Parámetros de Adaptación", padding="10")
+        options_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        options_frame.columnconfigure(1, weight=1)
+        
+        # 1. Idioma destino
+        ttk.Label(options_frame, text="Idioma Destino:").grid(row=0, column=0, sticky="w", pady=5)
+        self.translator_lang_var = tk.StringVar(value="Inglés")
+        lang_combo = ttk.Combobox(options_frame, textvariable=self.translator_lang_var, 
+                                  values=["Inglés", "Portugués", "Francés", "Alemán", "Italiano"], 
+                                  state="readonly", width=25)
+        lang_combo.grid(row=0, column=1, sticky="w", padx=5, pady=5)
+        
+        # 2. Modo de generación
+        ttk.Label(options_frame, text="Modo de Ejecución:").grid(row=1, column=0, sticky="w", pady=5)
+        self.translator_mode_var = tk.StringVar(value="Incremental")
+        mode_combo = ttk.Combobox(options_frame, textvariable=self.translator_mode_var, 
+                                  values=["Incremental", "Completo (Forzar todo)"], 
+                                  state="readonly", width=25)
+        mode_combo.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        
+        # 3. Control de Duplicados
+        ttk.Label(options_frame, text="Control de Duplicados:").grid(row=2, column=0, sticky="w", pady=5)
+        self.translator_update_var = tk.StringVar(value="Actualizar si ha cambiado")
+        update_combo = ttk.Combobox(options_frame, textvariable=self.translator_update_var, 
+                                    values=["Actualizar si ha cambiado", "Omitir (No actualizar)", "Actualizar todo"], 
+                                    state="readonly", width=25)
+        update_combo.grid(row=2, column=1, sticky="w", padx=5, pady=5)
+        
+        # Botones de Acción
+        action_buttons_frame = ttk.Frame(left_frame)
+        action_buttons_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(15, 0))
+        
+        self.btn_start_translation = ttk.Button(action_buttons_frame, text="🚀 Comenzar Adaptación", command=self.start_deck_translation)
+        self.btn_start_translation.pack(side="left", padx=5, fill="x", expand=True)
+        
+        self.btn_stop_translation = ttk.Button(action_buttons_frame, text="⏹️ Detener", state="disabled", command=self.stop_deck_translation)
+        self.btn_stop_translation.pack(side="right", padx=5)
+        
+        # --- PANEL DERECHO: Logs y Estadísticas ---
+        right_frame = ttk.Frame(self.anki_translator_frame)
+        right_frame.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(1, weight=1)
+        
+        # Subframe Estadísticas
+        stats_frame = ttk.LabelFrame(right_frame, text="📊 Estadísticas de Ejecución", padding="10")
+        stats_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        stats_frame.columnconfigure(0, weight=1)
+        stats_frame.columnconfigure(1, weight=1)
+        
+        self.stats_processed_var = tk.StringVar(value="Tarjetas analizadas: 0")
+        self.stats_generated_var = tk.StringVar(value="Tarjetas generadas/actualizadas: 0")
+        self.stats_skipped_var = tk.StringVar(value="Tarjetas omitidas: 0")
+        self.stats_errors_var = tk.StringVar(value="Errores encontrados: 0")
+        
+        ttk.Label(stats_frame, textvariable=self.stats_processed_var, font=("Arial", 10)).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Label(stats_frame, textvariable=self.stats_generated_var, font=("Arial", 10)).grid(row=0, column=1, sticky="w", pady=2)
+        ttk.Label(stats_frame, textvariable=self.stats_skipped_var, font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Label(stats_frame, textvariable=self.stats_errors_var, font=("Arial", 10)).grid(row=1, column=1, sticky="w", pady=2)
+        
+        # Subframe Logs
+        logs_container = ttk.LabelFrame(right_frame, text="📜 Logs del Adaptador", padding="5")
+        logs_container.grid(row=1, column=0, sticky="nsew")
+        logs_container.columnconfigure(0, weight=1)
+        logs_container.rowconfigure(0, weight=1)
+        
+        self.translator_logs_text = tk.Text(logs_container, wrap="word", height=20)
+        self.translator_logs_text.grid(row=0, column=0, sticky="nsew")
+        
+        logs_scrollbar = ttk.Scrollbar(logs_container, orient="vertical", command=self.translator_logs_text.yview)
+        logs_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.translator_logs_text.config(yscrollcommand=logs_scrollbar.set)
+
+    def refresh_deck_tree(self):
+        """Obtiene la lista de mazos de Anki y actualiza el Treeview."""
+        self.translator_log("Buscando mazos en Anki...")
+        
+        # Asegurarse de que Anki está corriendo
+        success, msg = self.anki_manager.ensure_anki_running()
+        if not success:
+            self.translator_log("❌ No se pudo conectar con Anki. Por favor asegúrate de que Anki está abierto.")
+            messagebox.showerror("Error de Conexión", f"No se pudo conectar con Anki: {msg}\n\nAsegúrate de tener Anki abierto y con AnkiConnect configurado.")
+            return
+            
+        decks = self.anki_manager.get_deck_names()
+        if not decks:
+            self.translator_log("⚠️ No se encontraron mazos en Anki.")
+            return
+            
+        # Limpiar
+        for item in self.translator_deck_tree.get_children():
+            self.translator_deck_tree.delete(item)
+            
+        # Poblar jerarquía
+        sorted_decks = sorted(decks)
+        inserted = {}
+        
+        for deck in sorted_decks:
+            parts = deck.split("::")
+            current_path = ""
+            parent_id = ""
+            
+            for part in parts:
+                if current_path:
+                    current_path += "::" + part
+                else:
+                    current_path = part
+                    
+                if current_path not in inserted:
+                    inserted[current_path] = self.translator_deck_tree.insert(
+                        parent_id, 
+                        "end", 
+                        iid=current_path, 
+                        text=part, 
+                        open=False
+                    )
+                parent_id = current_path
+                
+        self.translator_log(f"✅ Se cargaron {len(decks)} mazos exitosamente.")
+
+    def translator_log(self, message: str):
+        """Añade un mensaje al log del modo traductor/adaptador."""
+        self.ui_queue.put({"type": "log", "target": "translator", "message": message})
+
+    def start_deck_translation(self):
+        """Inicia el proceso de traducción/adaptación en un hilo secundario."""
+        selected = self.translator_deck_tree.selection()
+        if not selected:
+            messagebox.showwarning("Selección vacía", "Por favor, selecciona un mazo raíz en el panel izquierdo.")
+            return
+            
+        root_deck = selected[0]
+        target_lang = self.translator_lang_var.get()
+        execution_mode = self.translator_mode_var.get()
+        update_mode = self.translator_update_var.get()
+        
+        # Deshabilitar controles
+        self.btn_start_translation.config(state="disabled")
+        self.btn_stop_translation.config(state="normal")
+        self.translator_deck_tree.config(selectmode="none")
+        
+        # Resetear estadísticas
+        self.stats_processed_var.set("Tarjetas analizadas: 0")
+        self.stats_generated_var.set("Tarjetas generadas/actualizadas: 0")
+        self.stats_skipped_var.set("Tarjetas omitidas: 0")
+        self.stats_errors_var.set("Errores encontrados: 0")
+        
+        # Limpiar logs
+        self.translator_logs_text.delete("1.0", tk.END)
+        
+        # Crear evento de cancelación y lanzar hilo
+        self.translation_cancelled = threading.Event()
+        
+        self.translation_thread = threading.Thread(
+            target=self._run_deck_translation,
+            args=(root_deck, target_lang, execution_mode, update_mode),
+            daemon=True
+        )
+        self.translation_thread.start()
+        self.translator_log(f"🚀 Iniciando adaptación de mazo '{root_deck}' a {target_lang}...")
+
+    def stop_deck_translation(self):
+        """Solicita la cancelación del proceso de traducción."""
+        if hasattr(self, 'translation_cancelled'):
+            self.translation_cancelled.set()
+            self.translator_log("⏳ Solicitando cancelación del proceso...")
+            self.btn_stop_translation.config(state="disabled")
+
+    def _get_target_deck_name(self, selected_root: str, deck_name: str, suffix: str) -> str:
+        """Determina el nombre del mazo destino aplicando el sufijo al nivel adecuado."""
+        root_parts = selected_root.split("::")
+        deck_parts = deck_name.split("::")
+        
+        if deck_name == selected_root:
+            return deck_name + suffix
+            
+        idx_to_suffix = len(root_parts)
+        if idx_to_suffix < len(deck_parts):
+            new_parts = list(deck_parts)
+            new_parts[idx_to_suffix] = new_parts[idx_to_suffix] + suffix
+            return "::".join(new_parts)
+        else:
+            return deck_name + suffix
+
+    def _run_deck_translation(self, root_deck: str, target_lang: str, execution_mode: str, update_mode: str):
+        """Corre el proceso de traducción de mazos y tarjetas en segundo plano."""
+        stats = {"processed": 0, "generated": 0, "skipped": 0, "errors": 0}
+        
+        def update_stats():
+            self.ui_queue.put({
+                "type": "stats",
+                "processed": stats["processed"],
+                "generated": stats["generated"],
+                "skipped": stats["skipped"],
+                "errors": stats["errors"]
+            })
+            
+        try:
+            # 1. Inicializar Gemini
+            self.translator_log("Inicializando conexión con el modelo de lenguaje...")
+            if not self.flashcard_generator:
+                self.flashcard_generator = GeminiFlashcardGenerator(log_callback=self.translator_log)
+            
+            # 2. Obtener estructura de mazos
+            self.translator_log(f"Analizando estructura de mazos bajo '{root_deck}'...")
+            all_decks = self.anki_manager.get_deck_names()
+            target_decks = [d for d in all_decks if d == root_deck or d.startswith(root_deck + "::")]
+            
+            # Ordenar de mayor profundidad a menor (hojas primero) para filtrar notas específicas por mazo
+            target_decks = sorted(target_decks, key=lambda x: x.count("::"), reverse=True)
+            
+            self.translator_log(f"Se encontraron {len(target_decks)} mazos a procesar.")
+            
+            # 3. Mapear notas a su mazo exacto (evitando la herencia automática de búsqueda en Anki)
+            processed_note_ids = set()
+            deck_to_notes = {}
+            total_notes_to_process = 0
+            
+            for deck in target_decks:
+                if self.translation_cancelled.is_set():
+                    break
+                raw_note_ids = self.anki_manager.find_notes(f'deck:"{deck}"')
+                specific_note_ids = [nid for nid in raw_note_ids if nid not in processed_note_ids]
+                deck_to_notes[deck] = specific_note_ids
+                processed_note_ids.update(specific_note_ids)
+                total_notes_to_process += len(specific_note_ids)
+                
+            self.translator_log(f"Total de tarjetas individuales a analizar: {total_notes_to_process}")
+            
+            # Suffix según el idioma
+            suffix = " (EN)"
+            if target_lang == "Portugués": suffix = " (PT)"
+            elif target_lang == "Francés": suffix = " (FR)"
+            elif target_lang == "Alemán": suffix = " (DE)"
+            elif target_lang == "Italiano": suffix = " (IT)"
+            
+            # 4. Crear mazos destino para asegurar estructura jerárquica
+            self.translator_log("Creando estructura equivalente de mazos destino...")
+            for original_deck in reversed(target_decks): # Crear de raíz a hojas para orden natural en Anki
+                if self.translation_cancelled.is_set():
+                    break
+                target_deck = self._get_target_deck_name(root_deck, original_deck, suffix)
+                self.anki_manager.create_deck(target_deck)
+                
+            # 5. Procesar cada mazo
+            for original_deck in target_decks:
+                if self.translation_cancelled.is_set():
+                    break
+                    
+                note_ids = deck_to_notes.get(original_deck, [])
+                if not note_ids:
+                    continue
+                    
+                target_deck = self._get_target_deck_name(root_deck, original_deck, suffix)
+                self.translator_log(f"📂 Procesando mazo: '{original_deck}' → '{target_deck}' ({len(note_ids)} tarjetas)")
+                
+                # Obtener detalles de notas
+                notes_info = self.anki_manager.get_notes_info(note_ids)
+                
+                for note in notes_info:
+                    if self.translation_cancelled.is_set():
+                        break
+                        
+                    note_id = note.get('noteId')
+                    model_name = note.get('modelName')
+                    fields = note.get('fields', {})
+                    tags = note.get('tags', [])
+                    
+                    stats["processed"] += 1
+                    update_stats()
+                    
+                    # Convertir campos a formato simple {"nombre_campo": "valor"}
+                    original_field_values = {k: v.get('value', '') for k, v in fields.items()}
+                    
+                    # Validar si tiene contenido
+                    if not any(original_field_values.values()):
+                        self.translator_log(f"⚠️ Nota {note_id} está vacía. Omitiendo.")
+                        stats["skipped"] += 1
+                        update_stats()
+                        continue
+                        
+                    # Generar hash del contenido original
+                    import hashlib
+                    import json
+                    canonical_str = json.dumps(original_field_values, sort_keys=True)
+                    fields_hash = hashlib.md5(canonical_str.encode('utf-8')).hexdigest()
+                    
+                    # Verificar si ya existe traducción asociada
+                    existing_translated_ids = self.anki_manager.find_notes(f'tag:src_note_{note_id}')
+                    translated_note = None
+                    if existing_translated_ids:
+                        translated_infos = self.anki_manager.get_notes_info(existing_translated_ids)
+                        if translated_infos:
+                            translated_note = translated_infos[0]
+                            
+                    if translated_note:
+                        translated_note_id = translated_note['noteId']
+                        hash_tag = f"src_hash_{fields_hash}"
+                        is_up_to_date = hash_tag in translated_note.get('tags', [])
+                        
+                        if execution_mode == "Incremental":
+                            if is_up_to_date:
+                                self.translator_log(f"⏭️ Nota {note_id} ya traducida y al día. Omitiendo.")
+                                stats["skipped"] += 1
+                                update_stats()
+                                continue
+                            else:
+                                if "Omitir" in update_mode:
+                                    self.translator_log(f"⏭️ Nota {note_id} modificada pero el modo indica omitir actualización. Omitiendo.")
+                                    stats["skipped"] += 1
+                                    update_stats()
+                                    continue
+                                else:
+                                    self.translator_log(f"🔄 Nota {note_id} modificada. Actualizando traducción...")
+                        else:
+                            # En modo completo, si elegimos "Omitir" pero forzamos completo, podemos decidir
+                            if "Omitir" in update_mode and is_up_to_date:
+                                self.translator_log(f"⏭️ Nota {note_id} omitida por configuración de duplicados.")
+                                stats["skipped"] += 1
+                                update_stats()
+                                continue
+                            self.translator_log(f"🔄 Forzando actualización de nota {note_id}...")
+                            
+                    # Traducir con Gemini
+                    self.translator_log(f"🧠 Traduciendo nota {note_id} al {target_lang}...")
+                    
+                    prompt = f"""Actúas como un experto traductor y adaptador académico de flashcards de estudio.
+Tu tarea es traducir y adaptar los contenidos de las flashcards del español al {target_lang}.
+
+Campos originales de la flashcard (en formato JSON):
+{json.dumps(original_field_values, ensure_ascii=False, indent=2)}
+
+INSTRUCCIONES DE GENERACIÓN:
+1. Retorna un objeto JSON con exactamente las mismas claves (keys) que el JSON de entrada, pero con los valores traducidos/adaptados al {target_lang}.
+2. La traducción no debe ser literal. El contenido debe ser natural, académico, profesional y apropiado para estudiantes universitarios o profesionales.
+3. Preserva la terminología técnica estándar (por ejemplo, "consistencia eventual" -> "eventual consistency", "sistemas distribuidos" -> "distributed systems").
+4. Mantén ejemplos cuando aporten valor educativo.
+5. Corrige errores ortográficos menores encontrados en el contenido original.
+6. Si un campo contiene sintaxis de respuesta anidada de Anki (Cloze deletion), como "{{{{c1::texto}}}}" o "{{{{c2::texto::pista}}}}", debes conservar la estructura de los clozes ("{{{{c1::...}}}}") pero traducir el contenido que está dentro del cloze de manera natural al {target_lang}.
+7. Conserva cualquier formato HTML o Markdown (como <br>, <b>, <i>, etc.) si está presente en el texto original.
+8. Retorna ÚNICAMENTE el objeto JSON válido, sin bloques de código markdown, sin comentarios y sin texto adicional."""
+
+                    try:
+                        response_text = self.flashcard_generator.generate_raw_response(prompt, temperature=0.1)
+                        clean_text = response_text.strip()
+                        if clean_text.startswith("```json"):
+                            clean_text = clean_text[7:]
+                        if clean_text.endswith("```"):
+                            clean_text = clean_text[:-3]
+                        clean_text = clean_text.strip()
+                        
+                        translated_fields = json.loads(clean_text)
+                    except Exception as e:
+                        self.translator_log(f"❌ Error de IA al procesar nota {note_id}: {e}")
+                        stats["errors"] += 1
+                        update_stats()
+                        continue
+                        
+                    # Validar correspondencia de claves
+                    if not all(k in translated_fields for k in original_field_values.keys()):
+                        self.translator_log(f"❌ Error: El JSON retornado por la IA no contiene las mismas llaves para la nota {note_id}.")
+                        stats["errors"] += 1
+                        update_stats()
+                        continue
+                        
+                    # Guardar en Anki
+                    if translated_note:
+                        # Actualizar nota existente
+                        success, msg = self.anki_manager.update_note_fields(translated_note_id, translated_fields)
+                        if success:
+                            # Actualizar etiquetas
+                            old_hash_tags = [t for t in translated_note.get('tags', []) if t.startswith("src_hash_")]
+                            if old_hash_tags:
+                                self.anki_manager.remove_note_tags([translated_note_id], " ".join(old_hash_tags))
+                            self.anki_manager.add_note_tags([translated_note_id], f"src_hash_{fields_hash}")
+                            
+                            self.translator_log(f"✅ Nota {note_id} actualizada correctamente.")
+                            stats["generated"] += 1
+                        else:
+                            self.translator_log(f"❌ Error al actualizar en Anki nota {note_id}: {msg}")
+                            stats["errors"] += 1
+                        update_stats()
+                    else:
+                        # Crear nueva nota
+                        new_tags = list(tags)
+                        new_tags = [t for t in new_tags if not t.startswith("src_note_") and not t.startswith("src_hash_")]
+                        new_tags.append(f"src_note_{note_id}")
+                        new_tags.append(f"src_hash_{fields_hash}")
+                        
+                        new_note = {
+                            "deckName": target_deck,
+                            "modelName": model_name,
+                            "fields": translated_fields,
+                            "tags": new_tags
+                        }
+                        
+                        success, msg, count = self.anki_manager.add_notes(target_deck, [new_note])
+                        if success and count > 0:
+                            self.translator_log(f"✅ Nota {note_id} adaptada y creada en mazo '{target_deck}'.")
+                            stats["generated"] += 1
+                        else:
+                            self.translator_log(f"❌ Error al crear nota {note_id} en Anki: {msg}")
+                            stats["errors"] += 1
+                        update_stats()
+                        
+            if self.translation_cancelled.is_set():
+                self.ui_queue.put({"type": "translation_finished", "message": "El proceso fue cancelado por el usuario."})
+            else:
+                self.ui_queue.put({"type": "translation_finished", "message": f"Adaptación finalizada con éxito.\n\n- Analizadas: {stats['processed']}\n- Adaptadas/Actualizadas: {stats['generated']}\n- Omitidas: {stats['skipped']}\n- Errores: {stats['errors']}"})
+                
+        except Exception as e:
+            self.translator_log(f"💥 Error fatal en el proceso: {e}")
+            self.ui_queue.put({"type": "translation_finished", "message": f"El proceso falló por un error inesperado:\n{e}"})
+
     def show_audio_segments_window(self):
         """Abre la ventana emergente con los segmentos de audio procesados."""
         if self.audio_segments_window:
@@ -2267,6 +2766,17 @@ class AnkiImportInterface:
             lambda e: self.segments_canvas.configure(scrollregion=self.segments_canvas.bbox("all")))
         self.segments_canvas.bind("<Configure>", 
             lambda e: self.segments_canvas.itemconfig("inner", width=e.width))
+
+        # Botones de control de segmentos en la ventana emergente
+        popup_bottom_frame = ttk.Frame(self.segments_container, padding="5")
+        popup_bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        
+        self.popup_merge_btn = ttk.Button(popup_bottom_frame, text="🔗 Detectar y Unir Fragmentos Solapados",
+                                          command=self.merge_video_text_overlaps)
+        self.popup_merge_btn.pack(side="left", padx=5)
+        
+        close_btn = ttk.Button(popup_bottom_frame, text="Cerrar", command=self.hide_segments_window)
+        close_btn.pack(side="right", padx=5)
         
         # Área de configuración de agrupación
         grouping_frame = ttk.LabelFrame(left_panel, text="📋 Configurar Agrupación", padding="10")
@@ -2294,10 +2804,15 @@ class AnkiImportInterface:
                                             command=self.show_segments_window,
                                             state="disabled")
         self.view_segments_btn.grid(row=2, column=0, columnspan=3, pady=(10, 0), sticky="ew")
+
+        self.merge_segments_btn = ttk.Button(grouping_frame, text="🔗 Detectar y Unir Fragmentos",
+                                             command=self.merge_video_text_overlaps,
+                                             state="disabled")
+        self.merge_segments_btn.grid(row=3, column=0, columnspan=3, pady=(5, 0), sticky="ew")
         
         # --- Fuente de Consulta Completa ---
         source_frame = ttk.LabelFrame(grouping_frame, text="📋 Fuente de Consulta", padding="5")
-        source_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        source_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         source_frame.columnconfigure(1, weight=1)
         
         source_cb = ttk.Checkbutton(source_frame, text="Usar Fuente Completa (mejora contexto y coherencia)",
@@ -2508,7 +3023,10 @@ class AnkiImportInterface:
             "level_2_relations": ("2️⃣", "L2-Rel"),
             "level_3_application": ("3️⃣", "L3-App"),
             "level_4_analysis": ("4️⃣", "L4-Anal"),
-            "atomic_extraction": ("⚛️", "Atomic")
+            "atomic_extraction": ("⚛️", "Atomic"),
+            "forensic_analyst": ("🔎", "Forense"),
+            "environment_architect": ("🏗️", "Arquitecto"),
+            "speedrun_trainer": ("⚡", "Speedrun")
         }
         
         # Filtrar solo los tipos activos
@@ -3390,7 +3908,10 @@ class AnkiImportInterface:
             "level_2_relations": ("2️⃣", "L2-Rel"),
             "level_3_application": ("3️⃣", "L3-App"),
             "level_4_analysis": ("4️⃣", "L4-Anal"),
-            "atomic_extraction": ("⚛️", "Atomic")
+            "atomic_extraction": ("⚛️", "Atomic"),
+            "forensic_analyst": ("🔎", "Forense"),
+            "environment_architect": ("🏗️", "Arquitecto"),
+            "speedrun_trainer": ("⚡", "Speedrun")
         }
         
         # Filtrar solo los tipos activos
@@ -4099,6 +4620,7 @@ class AnkiImportInterface:
             # Habilitar botón de crear secciones y botón de ventana emergente
             self.root.after(0, lambda: self.create_sections_btn.config(state="normal"))
             self.root.after(0, lambda: self.view_segments_btn.config(state="normal"))
+            self.root.after(0, lambda: self.merge_segments_btn.config(state="normal"))
             self.root.after(0, self.show_segments_window)
             
             # Mostrar popup
@@ -4303,6 +4825,151 @@ class AnkiImportInterface:
                            f"Ahora puedes reorganizar los segmentos arrastrándolos\n"
                            f"entre secciones si lo deseas, o procesar directamente.")
     
+    def merge_video_text_overlaps(self):
+        """Detecta y elimina los fragmentos de texto solapados entre segmentos consecutivos."""
+        if not self.current_video_segments:
+            messagebox.showwarning("Sin segmentos", "No hay segmentos cargados o procesados.")
+            return
+
+        import re
+        def tokenize(text):
+            return re.findall(r'\b\w+\b', text.lower())
+
+        overlaps_found = []
+        # Guardaremos parejas de (i, i+1, overlap_text, cut_char_index)
+        for i in range(len(self.current_video_segments) - 1):
+            seg1 = self.current_video_segments[i]
+            seg2 = self.current_video_segments[i+1]
+            
+            s1 = seg1.transcription_text or ""
+            s2 = seg2.transcription_text or ""
+            
+            words1 = tokenize(s1)
+            words2 = tokenize(s2)
+            
+            if not words1 or not words2:
+                continue
+                
+            # Buscar coincidencia más larga de palabras (mínimo 3 palabras, máximo 150)
+            max_overlap_words = min(len(words1), len(words2), 150)
+            best_overlap_len = 0
+            for k in range(max_overlap_words, 2, -1):
+                if words1[-k:] == words2[:k]:
+                    best_overlap_len = k
+                    break
+                    
+            if best_overlap_len > 0:
+                # Encontramos solapamiento de `best_overlap_len` palabras.
+                # Obtener la posición de corte en s2
+                words2_iter = list(re.finditer(r'\b\w+\b', s2))
+                if len(words2_iter) >= best_overlap_len:
+                    cut_idx = words2_iter[best_overlap_len - 1].end()
+                    # Consumir espacios y puntuación siguientes
+                    while cut_idx < len(s2) and not s2[cut_idx].isalnum():
+                        cut_idx += 1
+                        
+                    overlap_words = words2[:best_overlap_len]
+                    overlap_preview = " ".join(overlap_words)
+                    overlaps_found.append((i, i+1, overlap_preview, cut_idx))
+
+        if not overlaps_found:
+            messagebox.showinfo("Detección de Solapamientos", "No se detectaron fragmentos de texto solapados entre los segmentos.")
+            return
+
+        # Mostrar cuadro de diálogo de confirmación detallado
+        confirm_msg = "Se detectaron los siguientes solapamientos de texto entre segmentos consecutivos:\n\n"
+        for idx1, idx2, preview, _ in overlaps_found:
+            # Mostrar una vista corta del solapamiento
+            preview_short = preview if len(preview) < 60 else preview[:57] + "..."
+            confirm_msg += f"• Segmento {self.current_video_segments[idx1].segment_id} ➔ {self.current_video_segments[idx2].segment_id}:\n"
+            confirm_msg += f"  Solape: \"{preview_short}\"\n\n"
+        confirm_msg += "¿Deseas unir los fragmentos eliminando estos solapamientos?"
+
+        if not messagebox.askyesno("Confirmar Unión de Fragmentos", confirm_msg):
+            return
+
+        # Aplicar el recorte
+        self.video_log(f"\n🔗 Uniendo fragmentos de texto y eliminando solapamientos...")
+        applied_count = 0
+        for idx1, idx2, preview, cut_idx in overlaps_found:
+            seg1 = self.current_video_segments[idx1]
+            seg2 = self.current_video_segments[idx2]
+            
+            old_text = seg2.transcription_text
+            new_text = old_text[cut_idx:]
+            
+            seg2.transcription_text = new_text
+            seg2.char_count = len(new_text)
+            
+            # Guardar el texto recortado en disco
+            # 1. En la carpeta chunks de la sesión jerárquica
+            if self.current_video_session:
+                chunks_dir = os.path.join(self.current_video_session, "chunks")
+                chunk_file = os.path.join(chunks_dir, f"segment_{seg2.segment_id:03d}.txt")
+                try:
+                    with open(chunk_file, 'w', encoding='utf-8') as f:
+                        f.write(new_text)
+                    self.video_log(f"   💾 Segmento {seg2.segment_id} actualizado en: {chunk_file}")
+                except Exception as e:
+                    self.video_log(f"   ⚠️ Error actualizando archivo chunk {seg2.segment_id}: {e}")
+            
+            # 2. En la ruta original del procesador de videos
+            if seg2.transcription_path and os.path.exists(seg2.transcription_path):
+                try:
+                    # Escribir con el formato de metadatos original si era el archivo del procesador
+                    with open(seg2.transcription_path, 'w', encoding='utf-8') as f:
+                        f.write(f"# Segmento {seg2.segment_id}\n")
+                        f.write(f"# Tiempo: {seg2.get_time_range_str()}\n")
+                        f.write(f"# Duración: {seg2.duration:.1f}s\n")
+                        f.write(f"# Caracteres: {seg2.char_count}\n\n")
+                        f.write(new_text)
+                    self.video_log(f"   💾 Segmento {seg2.segment_id} actualizado en: {seg2.transcription_path}")
+                except Exception as e:
+                    self.video_log(f"   ⚠️ Error actualizando archivo del procesador {seg2.segment_id}: {e}")
+            
+            self.video_log(f"   ✂️ Cortado solapamiento en Segmento {seg2.segment_id} (Se removieron {cut_idx} caracteres)")
+            applied_count += 1
+
+        # Actualizar la transcripción completa consolidada si existe
+        if self.current_video_session:
+            try:
+                full_transcription = "\n\n".join([
+                    f"--- Segmento {s.segment_id} ({s.start_time} - {s.end_time}) ---\n{s.transcription_text}"
+                    for s in self.current_video_segments
+                ])
+                self.flashcard_generator._save_ocr_transcript(
+                    full_transcription, self.current_video_session, "original_full_transcription", 
+                    subfolder="original_text"
+                )
+                self.video_log(f"   💾 Transcripción completa consolidada actualizada")
+            except Exception as e:
+                self.video_log(f"   ⚠️ Error actualizando transcripción consolidada: {e}")
+
+        # Intentar actualizar metadata.json si existe en la carpeta temporal o en la sesión
+        for folder in [self.current_video_session]:
+            if not folder: continue
+            metadata_path = os.path.join(folder, "metadata.json")
+            if os.path.exists(metadata_path):
+                try:
+                    with open(metadata_path, 'r', encoding='utf-8') as f:
+                        meta = json.load(f)
+                    
+                    meta_segs = meta.get("segments", [])
+                    for s in self.current_video_segments:
+                        for ms in meta_segs:
+                            if ms.get("id") == s.segment_id:
+                                ms["char_count"] = s.char_count
+                                
+                    with open(metadata_path, 'w', encoding='utf-8') as f:
+                        json.dump(meta, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    pass
+
+        # Forzar redibujado de las tarjetas en la ventana de segmentos para mostrar los nuevos conteos y transcripciones
+        self._display_video_segments()
+        
+        messagebox.showinfo("Unión Completada", f"Se procesaron y unieron con éxito {applied_count} fragmentos de texto solapados.")
+
     def _create_video_section_widget(self, section: VideoSection):
         """Crea el widget visual para una sección de video."""
         section_frame = ttk.LabelFrame(self.video_sections_inner_frame, padding="10")
@@ -4380,7 +5047,10 @@ class AnkiImportInterface:
             "level_2_relations": ("2️⃣", "L2"),
             "level_3_application": ("3️⃣", "L3"),
             "level_4_analysis": ("4️⃣", "L4"),
-            "atomic_extraction": ("⚛️", "Atomic")
+            "atomic_extraction": ("⚛️", "Atomic"),
+            "forensic_analyst": ("🔎", "Forense"),
+            "environment_architect": ("🏗️", "Arquitecto"),
+            "speedrun_trainer": ("⚡", "Speedrun")
         }
         
         status_labels = {}
@@ -4696,7 +5366,10 @@ class AnkiImportInterface:
             "level_2_relations": ("2️⃣", "L2"),
             "level_3_application": ("3️⃣", "L3"),
             "level_4_analysis": ("4️⃣", "L4"),
-            "atomic_extraction": ("⚛️", "Atomic")
+            "atomic_extraction": ("⚛️", "Atomic"),
+            "forensic_analyst": ("🔎", "Forense"),
+            "environment_architect": ("🏗️", "Arquitecto"),
+            "speedrun_trainer": ("⚡", "Speedrun")
         }
         
         card_types_icons = [
@@ -4789,6 +5462,8 @@ class AnkiImportInterface:
                 self.change_video_btn.pack_forget()
             if hasattr(self, 'view_segments_btn'):
                 self.view_segments_btn.config(state="disabled")
+            if hasattr(self, 'merge_segments_btn'):
+                self.merge_segments_btn.config(state="disabled")
                 
             # Ocultar popup de segmentos si está abierto
             if self.segments_window:
@@ -5826,6 +6501,7 @@ class AnkiImportInterface:
         # Habilitar botones adicionales
         self.create_sections_btn.config(state="normal")
         self.view_segments_btn.config(state="normal")
+        self.merge_segments_btn.config(state="normal")
         self.show_segments_window()
         
         recovered_with_trans = sum(1 for s in self.current_video_segments if s.transcription_text)
@@ -5858,6 +6534,9 @@ class AnkiImportInterface:
             "high_performance_architect": "Alto Rendimiento",
             "exam_pareto": "Examen Pareto",
             "exam_faithful": "Examen Fiel",
+            "forensic_analyst": "Analista Forense",
+            "environment_architect": "Arquitecto del Entorno",
+            "speedrun_trainer": "Entrenador de Speedrun"
         }
         # Invertir para buscar por sufijo de archivo
         suffix_to_type = {v.lower().replace(" ", "_"): k for k, v in type_labels.items()}
@@ -6358,6 +7037,9 @@ class AnkiImportInterface:
             "high_performance_architect": "⚡ Alto Rendimiento (Arquitecto)",
             "exam_pareto": "🎯 Examen Pareto (Q&A Pareto)",
             "exam_faithful": "📖 Examen Fiel (Q&A Ideas Principales)",
+            "forensic_analyst": "🔎 Analista Forense (Flujos y Lógica)",
+            "environment_architect": "🏗️ Arquitecto del Entorno (SRE y Big-O)",
+            "speedrun_trainer": "⚡ Entrenador de Speedrun (Sintaxis y Código)",
         }
         
         # Frame superior: Selector de set

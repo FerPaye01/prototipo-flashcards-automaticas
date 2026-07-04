@@ -460,3 +460,152 @@ class AnkiSyncManager:
         
         # Añadir notas a Anki
         return self.add_notes(deck_name, anki_notes)
+
+    def get_deck_names(self) -> List[str]:
+        """Obtiene la lista de todos los mazos en Anki."""
+        if not self._check_anki_status():
+            return []
+        try:
+            response = requests.post(
+                self.ANKI_CONNECT_URL,
+                json={
+                    "action": "deckNames",
+                    "version": self.ANKI_CONNECT_VERSION
+                },
+                timeout=5
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if not result.get("error"):
+                    return result.get("result", [])
+        except Exception as e:
+            self.last_error = f"Error getting deck names: {e}"
+        return []
+
+    def find_notes(self, query: str) -> List[int]:
+        """Busca notas según la consulta especificada."""
+        if not self._check_anki_status():
+            return []
+        try:
+            response = requests.post(
+                self.ANKI_CONNECT_URL,
+                json={
+                    "action": "findNotes",
+                    "version": self.ANKI_CONNECT_VERSION,
+                    "params": {"query": query}
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if not result.get("error"):
+                    return result.get("result", [])
+        except Exception as e:
+            self.last_error = f"Error searching notes: {e}"
+        return []
+
+    def get_notes_info(self, note_ids: List[int]) -> List[Dict[str, Any]]:
+        """Obtiene información detallada de una lista de IDs de notas."""
+        if not self._check_anki_status() or not note_ids:
+            return []
+        try:
+            response = requests.post(
+                self.ANKI_CONNECT_URL,
+                json={
+                    "action": "notesInfo",
+                    "version": self.ANKI_CONNECT_VERSION,
+                    "params": {"notes": note_ids}
+                },
+                timeout=20
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if not result.get("error"):
+                    return result.get("result", [])
+        except Exception as e:
+            self.last_error = f"Error getting notes info: {e}"
+        return []
+
+    def update_note_fields(self, note_id: int, fields: Dict[str, str]) -> Tuple[bool, str]:
+        """Actualiza los campos de una nota existente."""
+        if not self._check_anki_status():
+            return False, "Anki is not running"
+        try:
+            response = requests.post(
+                self.ANKI_CONNECT_URL,
+                json={
+                    "action": "updateNoteFields",
+                    "version": self.ANKI_CONNECT_VERSION,
+                    "params": {
+                        "note": {
+                            "id": note_id,
+                            "fields": fields
+                        }
+                    }
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("error"):
+                    return False, f"AnkiConnect error: {result['error']}"
+                return True, "Note fields updated successfully"
+            return False, "Failed to update note fields"
+        except Exception as e:
+            self.last_error = str(e)
+            return False, f"Error updating note fields: {e}"
+
+    def add_note_tags(self, note_ids: List[int], tags: str) -> Tuple[bool, str]:
+        """Añade etiquetas a una lista de notas."""
+        if not self._check_anki_status() or not note_ids:
+            return False, "Anki is not running or no notes specified"
+        try:
+            response = requests.post(
+                self.ANKI_CONNECT_URL,
+                json={
+                    "action": "addTags",
+                    "version": self.ANKI_CONNECT_VERSION,
+                    "params": {
+                        "notes": note_ids,
+                        "tags": tags
+                    }
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("error"):
+                    return False, f"AnkiConnect error: {result['error']}"
+                return True, "Tags added successfully"
+            return False, "Failed to add tags"
+        except Exception as e:
+            self.last_error = str(e)
+            return False, f"Error adding tags: {e}"
+
+    def remove_note_tags(self, note_ids: List[int], tags: str) -> Tuple[bool, str]:
+        """Elimina etiquetas de una lista de notas."""
+        if not self._check_anki_status() or not note_ids:
+            return False, "Anki is not running or no notes specified"
+        try:
+            response = requests.post(
+                self.ANKI_CONNECT_URL,
+                json={
+                    "action": "removeTags",
+                    "version": self.ANKI_CONNECT_VERSION,
+                    "params": {
+                        "notes": note_ids,
+                        "tags": tags
+                    }
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("error"):
+                    return False, f"AnkiConnect error: {result['error']}"
+                return True, "Tags removed successfully"
+            return False, "Failed to remove tags"
+        except Exception as e:
+            self.last_error = str(e)
+            return False, f"Error removing tags: {e}"
+

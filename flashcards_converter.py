@@ -164,6 +164,9 @@ class FlashcardsConverter:
         # Tipos de Examen
         elif card_type in ["exam_pareto", "exam_faithful"]:
             flashcards = FlashcardsConverter.parse_basic(text)
+        # Especialista Técnico
+        elif card_type in ["forensic_analyst", "environment_architect", "speedrun_trainer"]:
+            flashcards = FlashcardsConverter.parse_basic(text)
         else:
             flashcards = []
         

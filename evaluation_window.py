@@ -6,12 +6,13 @@ import json
 import os
 import numpy as np
 from typing import List, Dict, Any, Callable, Tuple
+from qyi_evaluator import EduKGRanker
 
 class EvaluationUI(tk.Toplevel):
     def __init__(self, parent, pending_imports: List[Dict[str, Any]], on_complete: Callable, generator, app=None):
         super().__init__(parent)
         self.title("🎓 Rúbrica Pedagógica e Indicadores QYI (IA)")
-        self.geometry("1200x700")
+        self.geometry("1250x750")
         self.minsize(1000, 550)
         self.grab_set()  # Ventana modal
         
@@ -23,6 +24,7 @@ class EvaluationUI(tk.Toplevel):
         # Guardar una copia profunda/segura original en caso de restauración
         self.original_flat_cards = []
         self.flat_flashcards = []
+        self.discard_history = []
         
         for group in self.pending_imports:
             deck_name = group['deck_name']
@@ -39,6 +41,7 @@ class EvaluationUI(tk.Toplevel):
                 c_copy['_centralidad'] = 0.0
                 c_copy['_utilidad'] = 0.0
                 c_copy['_explicacion'] = "No evaluada aún."
+                c_copy['_bloom'] = 2
                 
                 self.flat_flashcards.append(c_copy)
                 self.original_flat_cards.append(dict(c_copy))
@@ -46,8 +49,18 @@ class EvaluationUI(tk.Toplevel):
         self._build_ui()
 
     def _build_ui(self):
-        # Panel principal dividido
-        paned = ttk.PanedWindow(self, orient="horizontal")
+        # Crear Notebook para las pestañas
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True)
+
+        self.main_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.main_tab, text="🎓 Evaluación QYI")
+
+        self.lab_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.lab_tab, text="🔬 Laboratorio QYI")
+
+        # Panel principal dividido en la pestaña de Evaluación
+        paned = ttk.PanedWindow(self.main_tab, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=10, pady=10)
         
         # --- PANEL IZQUIERDO: Control y Explicaciones ---
@@ -104,9 +117,16 @@ class EvaluationUI(tk.Toplevel):
         
         self._detect_source_context()
         
-        # Sección 2: Ejecución
         run_frame = ttk.LabelFrame(left_panel, text="⚙️ Ejecutar Evaluación", padding=10)
         run_frame.pack(fill="x", pady=(0, 10))
+        
+        # Tamaño del Lote de Flashcards para IA
+        batch_row = ttk.Frame(run_frame)
+        batch_row.pack(fill="x", pady=2)
+        ttk.Label(batch_row, text="Tamaño de Lote IA:").pack(side="left", padx=5)
+        self.spin_batch_size = ttk.Spinbox(batch_row, from_=1, to=50, width=5)
+        self.spin_batch_size.set("10")
+        self.spin_batch_size.pack(side="left", padx=5)
         
         self.btn_run = ttk.Button(run_frame, text="🔍 Iniciar Rúbrica con IA", command=self._start_evaluation)
         self.btn_run.pack(fill="x", pady=5)
@@ -155,7 +175,7 @@ class EvaluationUI(tk.Toplevel):
         chk_high = ttk.Checkbutton(filter_frame, text="Solo tarjetas de Alto Impacto", variable=self.check_only_high)
         chk_high.grid(row=0, column=4, sticky="w", padx=15, pady=2)
         
-        # Fila 1: Concepto, Texto Búsqueda y Botón
+        # Fila 1: Concepto, Texto Búsqueda, Umbral PageRank
         ttk.Label(filter_frame, text="Filtrar Concepto:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         self.combo_concept_filter = ttk.Combobox(filter_frame, state="readonly", width=18)
         self.combo_concept_filter.grid(row=1, column=1, sticky="w", padx=5, pady=5)
@@ -165,10 +185,32 @@ class EvaluationUI(tk.Toplevel):
         self.entry_search = ttk.Entry(filter_frame, width=15)
         self.entry_search.grid(row=1, column=3, sticky="w", padx=5, pady=5)
         
-        btn_apply_filter = ttk.Button(filter_frame, text="🧹 Descartar que no cumplan", command=self._apply_quick_filters)
-        btn_apply_filter.grid(row=1, column=4, sticky="e", padx=10, pady=5)
+        ttk.Label(filter_frame, text="Umbral PageRank (Percentil):").grid(row=1, column=4, sticky="w", padx=15, pady=5)
+        self.spin_pr_threshold = ttk.Spinbox(filter_frame, from_=0.0, to=1.0, increment=0.05, width=6)
+        self.spin_pr_threshold.set("0.60")
+        self.spin_pr_threshold.grid(row=1, column=5, sticky="w", padx=5, pady=5)
+        
+        # Fila 2: Botones de Descarte y Guardado
+        btn_filter_frame = ttk.Frame(filter_frame)
+        btn_filter_frame.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(8, 2))
+        
+        btn_prelim = ttk.Button(btn_filter_frame, text="🧹 Aplicar Descarte Preliminar", command=self._apply_preliminary_discard)
+        btn_prelim.pack(side="left", padx=5)
+        
+        btn_visible = ttk.Button(btn_filter_frame, text="👁️ Descartar solo lo visible", command=self._apply_visible_discard)
+        btn_visible.pack(side="left", padx=5)
+        
+        btn_save_normal = ttk.Button(btn_filter_frame, text="💾 Guardar Normal", command=self._apply_and_close)
+        btn_save_normal.pack(side="left", padx=5)
+        
+        self.btn_undo = ttk.Button(btn_filter_frame, text="↩️ Deshacer último paso", command=self._undo_last_discard, state="disabled")
+        self.btn_undo.pack(side="left", padx=5)
         
         self._update_concept_filter_dropdown()
+        
+        # Binds para filtrado visual en tiempo real
+        self.combo_concept_filter.bind("<<ComboboxSelected>>", lambda e: self._update_table_view())
+        self.entry_search.bind("<KeyRelease>", lambda e: self._update_table_view())
         
         # Sección 2: Tabla de Tarjetas
         table_frame = ttk.LabelFrame(right_panel, text="📋 Listado de Tarjetas en Sala de Espera")
@@ -177,14 +219,14 @@ class EvaluationUI(tk.Toplevel):
         columns = ("deck", "concept", "front", "calidad", "impacto", "pagerank", "utilidad", "explicacion")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="extended")
         
-        self.tree.heading("deck", text="Mazo")
-        self.tree.heading("concept", text="Concepto")
-        self.tree.heading("front", text="Pregunta")
-        self.tree.heading("calidad", text="Calidad")
-        self.tree.heading("impacto", text="Examen")
-        self.tree.heading("pagerank", text="PageRank")
-        self.tree.heading("utilidad", text="Utilidad")
-        self.tree.heading("explicacion", text="Análisis Didáctico de la IA")
+        self.tree.heading("deck", text="Mazo", command=lambda: self._sort_treeview_column("deck", False))
+        self.tree.heading("concept", text="Concepto", command=lambda: self._sort_treeview_column("concept", False))
+        self.tree.heading("front", text="Pregunta", command=lambda: self._sort_treeview_column("front", False))
+        self.tree.heading("calidad", text="Calidad", command=lambda: self._sort_treeview_column("calidad", False))
+        self.tree.heading("impacto", text="Examen", command=lambda: self._sort_treeview_column("impacto", False))
+        self.tree.heading("pagerank", text="PageRank", command=lambda: self._sort_treeview_column("pagerank", False))
+        self.tree.heading("utilidad", text="Utilidad", command=lambda: self._sort_treeview_column("utilidad", False))
+        self.tree.heading("explicacion", text="Análisis Didáctico de la IA", command=lambda: self._sort_treeview_column("explicacion", False))
         
         self.tree.column("deck", width=120, stretch=False)
         self.tree.column("concept", width=120, stretch=False)
@@ -220,17 +262,70 @@ class EvaluationUI(tk.Toplevel):
         self.lbl_card_stats.pack(side="left", padx=15)
         
         self.btn_apply = ttk.Button(actions_frame, text="✅ Guardar y Aplicar a Sala de Espera", 
-                                    command=self._apply_and_close, state="disabled")
+                                    command=self._apply_and_close)
         self.btn_apply.pack(side="right", padx=5)
         
         self._update_table_view()
+        
+        # --- AGREGAR DASHBOARD EN METRICS_FRAME (Sección 5) ---
+        ttk.Separator(self.metrics_frame, orient="horizontal").pack(fill="x", pady=10)
+        
+        db_title = ttk.Label(self.metrics_frame, text="📊 Dashboard Rápido", font=("Segoe UI", 10, "bold"))
+        db_title.pack(anchor="w", pady=(0, 5))
+        
+        self.db_grid_frame = tk.Frame(self.metrics_frame)
+        self.db_grid_frame.pack(fill="x", expand=True)
+        
+        self.db_grid_frame.columnconfigure(0, weight=1)
+        self.db_grid_frame.columnconfigure(1, weight=1)
+        self.db_grid_frame.columnconfigure(2, weight=1)
+        
+        # Tarjetas resumen
+        f_total, self.lbl_db_total = self._create_dashboard_card(self.db_grid_frame, "Total Flashcards", "#E8F0FE", "#1A73E8")
+        f_total.grid(row=0, column=0, padx=2, pady=2, sticky="nsew")
+        
+        f_aprob, self.lbl_db_aprob = self._create_dashboard_card(self.db_grid_frame, "Aprobadas", "#ECFDF5", "#059669")
+        f_aprob.grid(row=0, column=1, padx=2, pady=2, sticky="nsew")
+        
+        f_rech, self.lbl_db_rech = self._create_dashboard_card(self.db_grid_frame, "Rechazadas", "#FFE4E6", "#E11D48")
+        f_rech.grid(row=0, column=2, padx=2, pady=2, sticky="nsew")
+        
+        f_b1, self.lbl_db_b1 = self._create_dashboard_card(self.db_grid_frame, "Bloom I", "#F3E8FF", "#7C3AED")
+        f_b1.grid(row=1, column=0, padx=2, pady=2, sticky="nsew")
+        
+        f_b2, self.lbl_db_b2 = self._create_dashboard_card(self.db_grid_frame, "Bloom II", "#E6FFFA", "#0D9488")
+        f_b2.grid(row=1, column=1, padx=2, pady=2, sticky="nsew")
+        
+        f_b3, self.lbl_db_b3 = self._create_dashboard_card(self.db_grid_frame, "Bloom III+", "#FEF3C7", "#D97706")
+        f_b3.grid(row=1, column=2, padx=2, pady=2, sticky="nsew")
+        
+        # --- INICIALIZAR PESTAÑA LABORATORIO ---
+        self._build_lab_tab()
 
     def _update_table_view(self):
         # Limpiar Treeview
         for item in self.tree.get_children():
             self.tree.delete(item)
             
+        # Filtros visuales en tiempo real (no destructivos)
+        concept_filter = self.combo_concept_filter.get() if hasattr(self, 'combo_concept_filter') else "Todos"
+        search_query = self.entry_search.get().strip().lower() if hasattr(self, 'entry_search') else ""
+        
         for idx, card in enumerate(self.flat_flashcards):
+            card_concept = card.get('concept', 'general') if card.get('concept') else 'general'
+            
+            # Filtro de concepto
+            if concept_filter != "Todos" and card_concept != concept_filter:
+                continue
+                
+            # Filtro de búsqueda por texto
+            if search_query:
+                front_text = card.get('front', card.get('text', '')).lower()
+                back_text = card.get('back', '').lower()
+                concept_text = card_concept.lower()
+                if search_query not in front_text and search_query not in back_text and search_query not in concept_text:
+                    continue
+                    
             impact_str = "Sí" if card['_impacto'] == 'S' else "No"
             pr_str = f"{card['_centralidad']:.3f}" if card['_status'] == "Evaluada" else "--"
             ut_str = f"{card['_utilidad']:.2f}" if card['_status'] == "Evaluada" else "--"
@@ -242,7 +337,7 @@ class EvaluationUI(tk.Toplevel):
                 iid=str(idx),
                 values=(
                     card['_deck_name'].split("::")[-1],  # Nombre corto de mazo
-                    card.get('concept', 'general') if card.get('concept') else 'general',
+                    card_concept,
                     card.get('front', card.get('text', ''))[:120],
                     cal_str,
                     impact_str if card['_status'] == "Evaluada" else "--",
@@ -252,6 +347,7 @@ class EvaluationUI(tk.Toplevel):
                 )
             )
         self.lbl_card_stats.config(text=f"Total en lista: {len(self.flat_flashcards)} tarjetas")
+        self._update_dashboard_metrics()
 
     def _clear_entire_waiting_room(self):
         """Vacía completamente la sala de espera."""
@@ -277,7 +373,6 @@ class EvaluationUI(tk.Toplevel):
         if not self.app:
             return
             
-        # 1. Caso: Hay segmentos de video, audio o secciones de libro con transcripciones que se pueden reconstruir
         mode = getattr(self.app, 'current_mode', '')
         segments = []
         if mode == "automatic_videos":
@@ -286,12 +381,28 @@ class EvaluationUI(tk.Toplevel):
             segments = getattr(self.app, 'current_audio_segments', [])
         elif mode == "automatic_books":
             segments = getattr(self.app, 'book_sections', [])
+        elif mode == "automatic_text":
+            segments = getattr(self.app, 'text_sections', [])
             
-        segments_with_trans = [s for s in segments if getattr(s, 'transcription_text', '')]
+        def get_segment_text(s):
+            t = getattr(s, 'transcription_text', '')
+            if not t:
+                t = getattr(s, 'text', '')
+            if not t and hasattr(s, 'get_text'):
+                try:
+                    t = s.get_text()
+                except Exception:
+                    pass
+            return t or ""
+
+        segments_with_trans = [s for s in segments if get_segment_text(s).strip()]
         
         if segments:
-            # Si hay segmentos en la sesión, el usuario siempre puede transcribir y unificar de nuevo
-            self.btn_transcribe_ia.config(state="normal")
+            # En modo texto, no tiene sentido transcribir con IA ya que el texto ya fue proveído
+            if mode == "automatic_text":
+                self.btn_transcribe_ia.config(state="disabled")
+            else:
+                self.btn_transcribe_ia.config(state="normal")
             
             if segments_with_trans:
                 self.btn_reconstruct.config(state="normal")
@@ -301,13 +412,16 @@ class EvaluationUI(tk.Toplevel):
             if hasattr(self.app, 'current_source_context') and self.app.current_source_context:
                 char_count = len(self.app.current_source_context)
                 self.lbl_source_status.config(text="✅ Fuente unificada detectada", foreground="green")
-                self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres lista para PageRank.\nSegmentos transcritos: {len(segments_with_trans)}/{len(segments)}.", foreground="black")
+                self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres lista para PageRank.\nSegmentos/Secciones listos: {len(segments_with_trans)}/{len(segments)}.", foreground="black")
             elif segments_with_trans:
                 self.lbl_source_status.config(text="⚠️ Fuente no unificada", foreground="orange")
                 self.lbl_source_info.config(text=f"Se detectaron {len(segments_with_trans)} de {len(segments)} segmentos con texto.\nPuedes unificarlos para el PageRank.", foreground="black")
             else:
-                self.lbl_source_status.config(text="⚠️ Sin transcripciones", foreground="red")
-                self.lbl_source_info.config(text="Debes transcribir los segmentos para poder unificarlos.", foreground="black")
+                self.lbl_source_status.config(text="⚠️ Sin texto en segmentos", foreground="red")
+                if mode == "automatic_text":
+                    self.lbl_source_info.config(text="Las secciones no contienen texto.", foreground="black")
+                else:
+                    self.lbl_source_info.config(text="Debes transcribir los segmentos para poder unificarlos.", foreground="black")
             return
             
         # 2. Caso manual o sin segmentos
@@ -337,18 +451,34 @@ class EvaluationUI(tk.Toplevel):
             segments = getattr(self.app, 'current_audio_segments', [])
         elif mode == "automatic_books":
             segments = getattr(self.app, 'book_sections', [])
+        elif mode == "automatic_text":
+            segments = getattr(self.app, 'text_sections', [])
             
-        segments_with_trans = sorted([s for s in segments if getattr(s, 'transcription_text', '')], key=lambda x: getattr(x, 'segment_id', getattr(x, 'section_id', 0)))
+        def get_segment_text(s):
+            t = getattr(s, 'transcription_text', '')
+            if not t:
+                t = getattr(s, 'text', '')
+            if not t and hasattr(s, 'get_text'):
+                try:
+                    t = s.get_text()
+                except Exception:
+                    pass
+            return t or ""
+
+        segments_with_trans = sorted(
+            [s for s in segments if get_segment_text(s).strip()],
+            key=lambda x: getattr(x, 'segment_id', getattr(x, 'section_id', 0))
+        )
         
         if not segments_with_trans:
-            messagebox.showwarning("Error", "No se encontraron transcripciones de segmentos para unificar.")
+            messagebox.showwarning("Error", "No se encontraron transcripciones o textos de segmentos para unificar.")
             return
             
         # Concatenar
         reconstructed = []
         for s in segments_with_trans:
             sid = getattr(s, 'segment_id', getattr(s, 'section_id', 0))
-            text = getattr(s, 'transcription_text', '').strip()
+            text = get_segment_text(s).strip()
             reconstructed.append(f"--- Segmento/Sección {sid} ---\n{text}")
             
         full_text = "\n\n".join(reconstructed)
@@ -362,6 +492,8 @@ class EvaluationUI(tk.Toplevel):
             session_dir = getattr(self.app, 'current_audio_session', None)
         elif mode == "automatic_books":
             session_dir = getattr(self.app, 'current_book_session', None)
+        elif mode == "automatic_text":
+            session_dir = getattr(self.app, 'current_text_session', None)
             
         if session_dir and os.path.isdir(session_dir):
             try:
@@ -369,7 +501,10 @@ class EvaluationUI(tk.Toplevel):
                 source_file = os.path.join(session_dir, "original_text", "reconstructed_faithful_source.txt")
                 with open(source_file, 'w', encoding='utf-8') as f:
                     f.write(full_text)
-                self.app.video_log(f"💾 Fuente unificada reconstruida y guardada en sesión: {source_file}")
+                if hasattr(self.app, 'text_log') and mode == "automatic_text":
+                    self.app.text_log(f"💾 Fuente unificada reconstruida y guardada en sesión: {source_file}")
+                elif hasattr(self.app, 'video_log'):
+                    self.app.video_log(f"💾 Fuente unificada reconstruida y guardada en sesión: {source_file}")
             except Exception as e:
                 print(f"⚠️ Error guardando fuente unificada reconstruida: {e}")
                 
@@ -473,63 +608,6 @@ class EvaluationUI(tk.Toplevel):
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo leer el archivo:\n{e}")
 
-    def _set_source_context(self, content: str, source_label: str):
-        if not content:
-            messagebox.showwarning("Archivo Vacío", "No se pudo obtener texto del archivo seleccionado.")
-            return
-            
-        if self.app:
-            self.app.current_source_context = content
-            
-        char_count = len(content)
-        self.lbl_source_status.config(text="✅ Fuente cargada", foreground="green")
-        self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres cargada desde {source_label}.", foreground="black")
-
-    def _extract_pdf_with_ia_thread(self, pdf_path: str, force_ocr: bool):
-        """Inicia un hilo en segundo plano para transcribir el PDF con Gemini."""
-        progress_win = tk.Toplevel(self)
-        progress_win.title("📄 Transcribiendo PDF con Gemini")
-        progress_win.geometry("450x180")
-        progress_win.resizable(False, False)
-        progress_win.grab_set()
-        
-        main_frame = ttk.Frame(progress_win, padding=20)
-        main_frame.pack(fill="both", expand=True)
-        
-        lbl_msg = ttk.Label(main_frame, text="Procesando archivo PDF con Gemini Vision OCR...\nEste proceso puede tomar un momento por página.", wrap=True)
-        lbl_msg.pack(fill="x", pady=(0, 10))
-        
-        pb = ttk.Progressbar(main_frame, mode="indeterminate")
-        pb.pack(fill="x", pady=10)
-        pb.start(10)
-        
-        def run_extraction():
-            try:
-                # Inicializar generador si no existe
-                if not self.app.flashcard_generator:
-                    active_config = self.app.config_manager.get_active_set()
-                    from gemini_flashcard_generator import GeminiFlashcardGenerator
-                    self.app.flashcard_generator = GeminiFlashcardGenerator(
-                        log_callback=self.app._mode_log,
-                        config_set=active_config
-                    )
-                
-                # Ejecutar extracción
-                extraction_mode = 2 if force_ocr else 1
-                text = self.app.flashcard_generator.extract_text_from_pdf_file(pdf_path, extraction_mode=extraction_mode)
-                
-                if text:
-                    self.after(0, lambda: self._set_source_context(text, f"Gemini OCR ({os.path.basename(pdf_path)})"))
-                    self.after(0, lambda: messagebox.showinfo("Éxito", f"Se ha extraído y cargado el contenido del PDF con Gemini correctamente."))
-                else:
-                    self.after(0, lambda: messagebox.showerror("Error", "No se pudo obtener texto del PDF usando Gemini."))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", f"Error durante la extracción de IA:\n{e}"))
-            finally:
-                self.after(0, progress_win.destroy)
-                
-        threading.Thread(target=run_extraction, daemon=True).start()
-
     def _start_evaluation(self):
         if not self.flat_flashcards:
             messagebox.showwarning("Sin tarjetas", "No hay tarjetas para evaluar.")
@@ -557,14 +635,32 @@ class EvaluationUI(tk.Toplevel):
                     segments = getattr(self.app, 'current_video_segments', [])
                 elif mode == "automatic_audio":
                     segments = getattr(self.app, 'current_audio_segments', [])
+                elif mode == "automatic_books":
+                    segments = getattr(self.app, 'book_sections', [])
+                elif mode == "automatic_text":
+                    segments = getattr(self.app, 'text_sections', [])
                 
-                segments_with_trans = sorted([s for s in segments if getattr(s, 'transcription_text', '')], key=lambda x: getattr(x, 'segment_id', 0))
+                def get_segment_text(s):
+                    t = getattr(s, 'transcription_text', '')
+                    if not t:
+                        t = getattr(s, 'text', '')
+                    if not t and hasattr(s, 'get_text'):
+                        try:
+                            t = s.get_text()
+                        except Exception:
+                            pass
+                    return t or ""
+
+                segments_with_trans = sorted(
+                    [s for s in segments if get_segment_text(s).strip()],
+                    key=lambda x: getattr(x, 'segment_id', getattr(x, 'section_id', 0))
+                )
                 if segments_with_trans:
                     reconstructed = []
                     for s in segments_with_trans:
-                        sid = getattr(s, 'segment_id', 0)
-                        text = getattr(s, 'transcription_text', '').strip()
-                        reconstructed.append(f"--- Segmento {sid} ---\n{text}")
+                        sid = getattr(s, 'segment_id', getattr(s, 'section_id', 0))
+                        text = get_segment_text(s).strip()
+                        reconstructed.append(f"--- Segmento/Sección {sid} ---\n{text}")
                     full_text = "\n\n".join(reconstructed)
                     self.app.current_source_context = full_text
                     text_ref = full_text
@@ -613,14 +709,18 @@ class EvaluationUI(tk.Toplevel):
                 
             normalize_pr = build_pr_percentile_normalizer(pagerank)
             
-            # Calcular umbral dinámico para Y_i (percentil 60)
-            def calcular_pr_threshold_dinamico(pagerank_values: dict, percentil_corte: float = 0.60) -> float:
+            # Calcular umbral dinámico para Y_i
+            def calcular_pr_threshold_dinamico(pagerank_values: dict, percentil_corte: float) -> float:
                 values = list(pagerank_values.values())
                 if not values:
                     return 0.0
                 return float(np.percentile(values, percentil_corte * 100))
                 
-            pr_threshold = calcular_pr_threshold_dinamico(pagerank)
+            try:
+                corte_val = float(self.spin_pr_threshold.get())
+            except ValueError:
+                corte_val = 0.60
+            pr_threshold = calcular_pr_threshold_dinamico(pagerank, corte_val)
             
             qualities = []
             is_high = []
@@ -655,6 +755,7 @@ class EvaluationUI(tk.Toplevel):
                 card['_centralidad'] = pr_val
                 card['_utilidad'] = util_score
                 card['_explicacion'] = explicacion
+                card['_bloom'] = bloom
                 
                 qualities.append(calidad / 10.0)
                 is_high.append(is_yield)
@@ -670,7 +771,12 @@ class EvaluationUI(tk.Toplevel):
             self.after(0, lambda err=str(e): self._on_evaluation_error(err))
 
     def _watchdog_evaluate_with_explanation(self, text: str, cards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        batch_size = 10
+        try:
+            batch_size = int(self.spin_batch_size.get())
+        except Exception:
+            batch_size = 10
+        batch_size = max(1, min(100, batch_size)) # Guard constraints
+        
         all_evals = []
         total_cards = len(cards)
         
@@ -819,7 +925,7 @@ class EvaluationUI(tk.Toplevel):
         detail_win = tk.Toplevel(self)
         detail_win.title("🔍 Detalle de la Tarjeta")
         detail_win.geometry("600x450")
-        detail_win.grab_set()
+        detail_win.transient(self)
         
         ttk.Label(detail_win, text="Pregunta / Anverso:", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=15, pady=(15, 2))
         t_front = tk.Text(detail_win, height=6, width=65, wrap="word", font=("Segoe UI", 10))
@@ -844,6 +950,33 @@ class EvaluationUI(tk.Toplevel):
         lbl_info = tk.Message(explain_frame, text=info_str, width=540, font=("Segoe UI", 9, "italic"), justify="left")
         lbl_info.pack(fill="both", expand=True)
 
+        detail_win.wait_visibility()
+        detail_win.grab_set()
+
+    def _push_history(self):
+        # Guardamos una copia del estado actual
+        self.discard_history.append([dict(c) for c in self.flat_flashcards])
+        if len(self.discard_history) > 20:
+            self.discard_history.pop(0)
+        if hasattr(self, 'btn_undo'):
+            self.btn_undo.config(state="normal")
+
+    def _undo_last_discard(self):
+        if not self.discard_history:
+            if hasattr(self, 'btn_undo'):
+                self.btn_undo.config(state="disabled")
+            messagebox.showinfo("Deshacer", "No hay acciones de descarte para deshacer.")
+            return
+        
+        self.flat_flashcards = self.discard_history.pop()
+        self._update_table_view()
+        self._recompute_qyi_if_evaluated()
+        self._update_concept_filter_dropdown()
+        
+        if not self.discard_history:
+            if hasattr(self, 'btn_undo'):
+                self.btn_undo.config(state="disabled")
+
     def _delete_selected(self):
         selections = self.tree.selection()
         if not selections:
@@ -853,6 +986,7 @@ class EvaluationUI(tk.Toplevel):
         if not messagebox.askyesno("Confirmar eliminación", f"¿Eliminar las {len(selections)} tarjetas seleccionadas?"):
             return
             
+        self._push_history()
         # Eliminar de la lista interna (recorrer al revés para no alterar índices al borrar)
         indices_to_delete = sorted([int(s) for s in selections], reverse=True)
         for idx in indices_to_delete:
@@ -865,6 +999,7 @@ class EvaluationUI(tk.Toplevel):
     def _restore_original(self):
         if not messagebox.askyesno("Confirmar restauración", "¿Restaurar todas las tarjetas al estado inicial sin filtros?"):
             return
+        self._push_history()
         self.flat_flashcards = [dict(c) for c in self.original_flat_cards]
         self._update_table_view()
         self._recompute_qyi_if_evaluated()
@@ -933,6 +1068,7 @@ class EvaluationUI(tk.Toplevel):
         if not messagebox.askyesno("Aplicar Filtros Rápidos", msg):
             return
             
+        self._push_history()
         self.flat_flashcards = filtered
         self._update_table_view()
         self._recompute_qyi_if_evaluated()
@@ -963,6 +1099,7 @@ class EvaluationUI(tk.Toplevel):
             self.lbl_phi_y.config(text="• Φ_Y (Yield/Impacto): --")
             self.lbl_phi_c.config(text="• Φ_C (Cobertura Red): --")
             self.lbl_total.config(text="• Tarjetas evaluadas: --")
+            self._update_dashboard_metrics()
             return
             
         qualities = [c['_calidad'] / 10.0 for c in self.flat_flashcards]
@@ -984,6 +1121,7 @@ class EvaluationUI(tk.Toplevel):
         self.lbl_phi_y.config(text=f"• Φ_Y (Yield/Impacto): {metrics.get('phi_y', 0.0):.2f}")
         self.lbl_phi_c.config(text=f"• Φ_C (Cobertura Red): {metrics.get('phi_c', 0.0):.2f}")
         self.lbl_total.config(text=f"• Tarjetas evaluadas: {metrics.get('total', 0)}")
+        self._update_dashboard_metrics()
 
     def _apply_and_close(self):
         # Reconstruir la lista de grupos (on_complete) filtrada
@@ -1030,6 +1168,1016 @@ class EvaluationUI(tk.Toplevel):
         # Abrir ventana de progreso
         TranscriptionProgressUI(self, segments, self.app, self._detect_source_context)
 
+    def _create_dashboard_card(self, parent, title, bg_color, fg_color):
+        card = tk.Frame(parent, bg=bg_color, highlightbackground="#DDDDDD", highlightthickness=1, bd=0)
+        
+        lbl_title = tk.Label(card, text=title, font=("Segoe UI", 8, "bold"), bg=bg_color, fg="#555555", anchor="w")
+        lbl_title.pack(fill="x", padx=6, pady=(4, 1))
+        
+        lbl_val = tk.Label(card, text="0", font=("Segoe UI", 14, "bold"), bg=bg_color, fg=fg_color, anchor="w")
+        lbl_val.pack(fill="x", padx=6, pady=(0, 4))
+        
+        return card, lbl_val
+
+    def _update_dashboard_metrics(self):
+        if not hasattr(self, 'lbl_db_total'):
+            return
+            
+        total_count = len(self.original_flat_cards)
+        aprob_count = len(self.flat_flashcards)
+        rech_count = total_count - aprob_count
+        
+        b1_count = sum(1 for c in self.flat_flashcards if c.get('_bloom', 2) == 1)
+        b2_count = sum(1 for c in self.flat_flashcards if c.get('_bloom', 2) == 2)
+        b3_count = sum(1 for c in self.flat_flashcards if c.get('_bloom', 2) >= 3)
+        
+        self.lbl_db_total.config(text=str(total_count))
+        self.lbl_db_aprob.config(text=str(aprob_count))
+        self.lbl_db_rech.config(text=str(rech_count))
+        self.lbl_db_b1.config(text=str(b1_count))
+        self.lbl_db_b2.config(text=str(b2_count))
+        self.lbl_db_b3.config(text=str(b3_count))
+
+    def _apply_preliminary_discard(self):
+        any_evaluated = any(c['_status'] == "Evaluada" for c in self.flat_flashcards)
+        if not any_evaluated:
+            messagebox.showwarning("Requiere evaluación", "Debes presionar 'Iniciar Rúbrica con IA' antes de aplicar filtros pedagógicos.")
+            return
+            
+        try:
+            min_qual = int(self.spin_quality.get())
+        except ValueError:
+            min_qual = 0
+            
+        try:
+            min_util = float(self.spin_utility.get())
+        except ValueError:
+            min_util = 0.0
+            
+        only_high = self.check_only_high.get()
+        
+        filtered = []
+        discarded_count = 0
+        
+        for c in self.flat_flashcards:
+            qual_ok = c['_calidad'] >= min_qual
+            util_ok = c['_utilidad'] >= min_util
+            impact_ok = True
+            if only_high and c['_impacto'] != 'S':
+                impact_ok = False
+                
+            if qual_ok and util_ok and impact_ok:
+                filtered.append(c)
+            else:
+                discarded_count += 1
+                
+        if discarded_count == 0:
+            messagebox.showinfo("Filtros Aplicados", "Todas las tarjetas cumplen con los filtros seleccionados.")
+            return
+            
+        msg = f"Se descartarán {discarded_count} tarjetas en todo el deck que no cumplen los filtros.\n¿Continuar?"
+        if not messagebox.askyesno("Aplicar Descarte Preliminar", msg):
+            return
+            
+        self._push_history()
+        self.flat_flashcards = filtered
+        self._update_table_view()
+        self._recompute_qyi_if_evaluated()
+        self._update_concept_filter_dropdown()
+
+    def _apply_visible_discard(self):
+        any_evaluated = any(c['_status'] == "Evaluada" for c in self.flat_flashcards)
+        if not any_evaluated:
+            messagebox.showwarning("Requiere evaluación", "Debes presionar 'Iniciar Rúbrica con IA' antes de aplicar filtros pedagógicos.")
+            return
+            
+        try:
+            min_qual = int(self.spin_quality.get())
+        except ValueError:
+            min_qual = 0
+            
+        try:
+            min_util = float(self.spin_utility.get())
+        except ValueError:
+            min_util = 0.0
+            
+        only_high = self.check_only_high.get()
+        concept_filter = self.combo_concept_filter.get()
+        search_query = self.entry_search.get().strip().lower()
+        
+        filtered = []
+        discarded_count = 0
+        
+        for c in self.flat_flashcards:
+            card_concept = c.get('concept', 'general') if c.get('concept') else 'general'
+            
+            is_visible = True
+            if concept_filter != "Todos" and card_concept != concept_filter:
+                is_visible = False
+            if search_query:
+                front_text = c.get('front', c.get('text', '')).lower()
+                back_text = c.get('back', '').lower()
+                concept_text = card_concept.lower()
+                if search_query not in front_text and search_query not in back_text and search_query not in concept_text:
+                    is_visible = False
+                    
+            if is_visible:
+                qual_ok = c['_calidad'] >= min_qual
+                util_ok = c['_utilidad'] >= min_util
+                impact_ok = True
+                if only_high and c['_impacto'] != 'S':
+                    impact_ok = False
+                    
+                if qual_ok and util_ok and impact_ok:
+                    filtered.append(c)
+                else:
+                    discarded_count += 1
+            else:
+                filtered.append(c)
+                
+        if discarded_count == 0:
+            messagebox.showinfo("Filtros Aplicados", "Todas las tarjetas visibles cumplen con los filtros seleccionados.")
+            return
+            
+        msg = f"Se descartarán {discarded_count} tarjetas visibles del concepto seleccionado.\n¿Continuar?"
+        if not messagebox.askyesno("Aplicar Descarte a Visibles", msg):
+            return
+            
+        self._push_history()
+        self.flat_flashcards = filtered
+        self._update_table_view()
+        self._recompute_qyi_if_evaluated()
+        self._update_concept_filter_dropdown()
+
+    def _sort_treeview_column(self, col, reverse):
+        l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+        
+        try:
+            def parse_val(val):
+                val_clean = val.replace('/10', '').replace('%', '').strip()
+                if val_clean == '--' or not val_clean:
+                    return -1.0
+                return float(val_clean)
+            l.sort(key=lambda t: parse_val(t[0]), reverse=reverse)
+        except ValueError:
+            l.sort(key=lambda t: t[0].lower(), reverse=reverse)
+            
+        for index, (val, k) in enumerate(l):
+            self.tree.move(k, '', index)
+            
+        self.tree.heading(col, command=lambda _col=col: self._sort_treeview_column(_col, not reverse))
+
+    def _build_lab_tab(self):
+        # Configurar panel superior para el caso de prueba (Sección 7)
+        top_frame = ttk.Frame(self.lab_tab, padding=10)
+        top_frame.pack(fill="x")
+        
+        lbl_title = ttk.Label(top_frame, text="🔬 Laboratorio de Exploración y Pruebas QYI", font=("Segoe UI", 12, "bold"))
+        lbl_title.pack(side="left", padx=5)
+        
+        # Sección 7: Casos de prueba
+        case_frame = ttk.Frame(top_frame)
+        case_frame.pack(side="right", padx=10)
+        
+        ttk.Label(case_frame, text="Caso de prueba:").pack(side="left", padx=5)
+        self.combo_cases = ttk.Combobox(case_frame, values=[
+            "Seleccionar un caso...",
+            "Detección de ruido",
+            "Bloom I vs II vs III",
+            "Concepto central vs periférico"
+        ], state="readonly", width=25)
+        self.combo_cases.set("Seleccionar un caso...")
+        self.combo_cases.pack(side="left", padx=5)
+        self.combo_cases.bind("<<ComboboxSelected>>", self._load_lab_case)
+        
+        # Main split using PanedWindow (Vertical: Top is Inputs, Bottom is Settings & Results)
+        v_paned = ttk.PanedWindow(self.lab_tab, orient="vertical")
+        v_paned.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        # --- PANE SUPERIOR: INPUTS (Sección 1) ---
+        inputs_paned = ttk.PanedWindow(v_paned, orient="horizontal")
+        v_paned.add(inputs_paned, weight=2)
+        
+        # Panel Izquierdo: Transcripción
+        left_input = ttk.LabelFrame(inputs_paned, text="📝 Transcripción de Referencia", padding=10)
+        inputs_paned.add(left_input, weight=1)
+        
+        self.lab_text = tk.Text(left_input, wrap="word", height=8, font=("Courier New", 9))
+        self.lab_text.pack(side="left", fill="both", expand=True)
+        
+        scroll_txt = ttk.Scrollbar(left_input, orient="vertical", command=self.lab_text.yview)
+        scroll_txt.pack(side="right", fill="y")
+        self.lab_text.configure(yscrollcommand=scroll_txt.set)
+        
+        # Panel Derecho: Flashcards de prueba (Tabla editable)
+        right_input = ttk.LabelFrame(inputs_paned, text="📋 Flashcards de Prueba (Tabla Editable)", padding=10)
+        inputs_paned.add(right_input, weight=1)
+        
+        columns = ("front", "back", "bloom", "comment")
+        self.lab_tree = ttk.Treeview(right_input, columns=columns, show="headings", selectmode="browse")
+        self.lab_tree.heading("front", text="Pregunta")
+        self.lab_tree.heading("back", text="Respuesta")
+        self.lab_tree.heading("bloom", text="Bloom Esperado")
+        self.lab_tree.heading("comment", text="Comentario")
+        
+        self.lab_tree.column("front", width=120)
+        self.lab_tree.column("back", width=120)
+        self.lab_tree.column("bloom", width=80, stretch=False, anchor="center")
+        self.lab_tree.column("comment", width=120)
+        
+        self.lab_tree.pack(fill="both", expand=True)
+        
+        # Botones de la tabla (Agregar, Editar, Eliminar)
+        btn_table_frame = ttk.Frame(right_input)
+        btn_table_frame.pack(fill="x", pady=(5, 0))
+        
+        btn_add = ttk.Button(btn_table_frame, text="➕ Agregar flashcard", command=self._lab_add_card)
+        btn_add.pack(side="left", padx=2)
+        
+        btn_edit = ttk.Button(btn_table_frame, text="✏️ Editar", command=self._lab_edit_card)
+        btn_edit.pack(side="left", padx=2)
+        
+        btn_del = ttk.Button(btn_table_frame, text="🗑️ Eliminar", command=self._lab_delete_card)
+        btn_del.pack(side="left", padx=2)
+        
+        # --- PANE INFERIOR: CONTROLES Y RESULTADOS (Secciones 2, 3, 4, 6) ---
+        bottom_frame = ttk.Frame(v_paned, padding=5)
+        v_paned.add(bottom_frame, weight=3)
+        
+        # Split bottom frame horizontally: Left is Config, Right is Results & Ranking
+        bottom_paned = ttk.PanedWindow(bottom_frame, orient="horizontal")
+        bottom_paned.pack(fill="both", expand=True)
+        
+        # Sección 2: Configuración (Panel izquierdo)
+        config_frame = ttk.LabelFrame(bottom_paned, text="⚙️ Configuración y Ejecución", padding=10)
+        bottom_paned.add(config_frame, weight=1)
+        
+        # Método de normalización
+        norm_row = ttk.Frame(config_frame)
+        norm_row.pack(fill="x", pady=5)
+        ttk.Label(norm_row, text="Normalización:").pack(side="left", padx=5)
+        
+        self.combo_norm = ttk.Combobox(norm_row, values=["Min-Max", "Percentil", "Z-Score", "Pesos"], state="readonly", width=12)
+        self.combo_norm.set("Percentil")
+        self.combo_norm.pack(side="left", padx=5)
+        self.combo_norm.bind("<<ComboboxSelected>>", lambda e: self._refresh_lab_results_ui())
+        
+        # Checkbox para usar IA
+        self.check_use_ia = tk.BooleanVar(value=True)
+        self.chk_ia = ttk.Checkbutton(norm_row, text="Usar IA (Watchdog)", variable=self.check_use_ia)
+        self.chk_ia.pack(side="left", padx=10)
+        
+        # Preset de Pesos (Sección 5)
+        preset_row = ttk.Frame(config_frame)
+        preset_row.pack(fill="x", pady=5)
+        ttk.Label(preset_row, text="Preset de Pesos:").pack(side="left", padx=5)
+        
+        self.combo_presets = ttk.Combobox(preset_row, values=[
+            "Personalizado",
+            "Examen alta exigencia (default)",
+            "Máxima precisión fáctica",
+            "Exploración de tema nuevo",
+            "Filtrado agresivo para examen"
+        ], state="readonly", width=25)
+        self.combo_presets.set("Examen alta exigencia (default)")
+        self.combo_presets.pack(side="left", padx=5)
+        self.combo_presets.bind("<<ComboboxSelected>>", self._apply_lab_preset)
+        
+        # Sliders ΦQ, ΦY, ΦC
+        slider_frame = ttk.Frame(config_frame)
+        slider_frame.pack(fill="both", expand=True, pady=10)
+        
+        # ΦQ
+        row_q = ttk.Frame(slider_frame)
+        row_q.pack(fill="x", pady=4)
+        ttk.Label(row_q, text="ΦQ (Calidad):", width=16, anchor="w").pack(side="left")
+        self.slider_phi_q = ttk.Scale(row_q, from_=0.0, to=1.0, value=0.30, orient="horizontal", command=self._on_slider_change)
+        self.slider_phi_q.pack(side="left", fill="x", expand=True, padx=5)
+        self.lbl_phi_q_val = ttk.Label(row_q, text="0.30", width=4)
+        self.lbl_phi_q_val.pack(side="right", padx=5)
+        
+        # ΦY
+        row_y = ttk.Frame(slider_frame)
+        row_y.pack(fill="x", pady=4)
+        ttk.Label(row_y, text="ΦY (Yield):", width=16, anchor="w").pack(side="left")
+        self.slider_phi_y = ttk.Scale(row_y, from_=0.0, to=1.0, value=0.40, orient="horizontal", command=self._on_slider_change)
+        self.slider_phi_y.pack(side="left", fill="x", expand=True, padx=5)
+        self.lbl_phi_y_val = ttk.Label(row_y, text="0.40", width=4)
+        self.lbl_phi_y_val.pack(side="right", padx=5)
+        
+        # ΦC
+        row_c = ttk.Frame(slider_frame)
+        row_c.pack(fill="x", pady=4)
+        ttk.Label(row_c, text="ΦC (Cobertura):", width=16, anchor="w").pack(side="left")
+        self.slider_phi_c = ttk.Scale(row_c, from_=0.0, to=1.0, value=0.30, orient="horizontal", command=self._on_slider_change)
+        self.slider_phi_c.pack(side="left", fill="x", expand=True, padx=5)
+        self.lbl_phi_c_val = ttk.Label(row_c, text="0.30", width=4)
+        self.lbl_phi_c_val.pack(side="right", padx=5)
+        
+        # Umbral PageRank
+        row_pr = ttk.Frame(slider_frame)
+        row_pr.pack(fill="x", pady=4)
+        ttk.Label(row_pr, text="Umbral PageRank:", width=16, anchor="w").pack(side="left")
+        self.slider_pr_thresh = ttk.Scale(row_pr, from_=0.0, to=1.0, value=0.60, orient="horizontal", command=self._on_slider_change)
+        self.slider_pr_thresh.pack(side="left", fill="x", expand=True, padx=5)
+        self.lbl_pr_thresh_val = ttk.Label(row_pr, text="0.60", width=4)
+        self.lbl_pr_thresh_val.pack(side="right", padx=5)
+        
+        # Botones de simulación
+        btn_action_frame = ttk.Frame(config_frame)
+        btn_action_frame.pack(fill="x", pady=(10, 0))
+        
+        self.btn_simulate = ttk.Button(btn_action_frame, text="▶️ Ejecutar Simulación", command=self._run_lab_simulation)
+        self.btn_simulate.pack(fill="x", pady=2)
+        
+        self.btn_compare_norm = ttk.Button(btn_action_frame, text="🔄 Comparar normalizaciones", command=self._compare_lab_normalizations)
+        self.btn_compare_norm.pack(fill="x", pady=2)
+        
+        self.lbl_lab_status = ttk.Label(btn_action_frame, text="Estado: Esperando simulación...", font=("Segoe UI", 9, "italic"))
+        self.lbl_lab_status.pack(fill="x", pady=5)
+        
+        # Resultados & Ranking (Panel derecho)
+        results_container = ttk.Frame(bottom_paned)
+        bottom_paned.add(results_container, weight=2)
+        
+        # Sección 3: Tabla de Resultados
+        results_frame = ttk.LabelFrame(results_container, text="📊 Resultados de la Simulación", padding=10)
+        results_frame.pack(fill="both", expand=True, side="left", padx=2)
+        
+        res_cols = ("front", "q", "y", "c", "score")
+        self.lab_res_tree = ttk.Treeview(results_frame, columns=res_cols, show="headings", selectmode="browse")
+        self.lab_res_tree.heading("front", text="Flashcard")
+        self.lab_res_tree.heading("q", text="Q")
+        self.lab_res_tree.heading("y", text="Y")
+        self.lab_res_tree.heading("c", text="C")
+        self.lab_res_tree.heading("score", text="Score Final")
+        
+        self.lab_res_tree.column("front", width=180)
+        self.lab_res_tree.column("q", width=50, anchor="center")
+        self.lab_res_tree.column("y", width=50, anchor="center")
+        self.lab_res_tree.column("c", width=50, anchor="center")
+        self.lab_res_tree.column("score", width=80, anchor="center")
+        
+        self.lab_res_tree.pack(fill="both", expand=True)
+        
+        # Sección 4: Ranking visual
+        ranking_frame = ttk.LabelFrame(results_container, text="🏆 Ranking Visual", padding=10)
+        ranking_frame.pack(fill="both", expand=True, side="right", padx=2)
+        
+        # Mejores flashcards
+        ttk.Label(ranking_frame, text="⭐ Mejores Flashcards (Top):", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        self.lab_txt_best = tk.Text(ranking_frame, height=5, wrap="word", font=("Segoe UI", 9), bg="#F0FFF4")
+        self.lab_txt_best.pack(fill="x", pady=(0, 10))
+        self.lab_txt_best.config(state="disabled")
+        
+        # Peores flashcards
+        ttk.Label(ranking_frame, text="⚠️ Peores Flashcards (Bottom):", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        self.lab_txt_worst = tk.Text(ranking_frame, height=5, wrap="word", font=("Segoe UI", 9), bg="#FFF5F5")
+        self.lab_txt_worst.pack(fill="x")
+        self.lab_txt_worst.config(state="disabled")
+        
+        # Cargar lista vacía de tarjetas
+        self.lab_cards = []
+        self._update_lab_table()
+
+    def _on_slider_change(self, val=None):
+        q_val = self.slider_phi_q.get()
+        y_val = self.slider_phi_y.get()
+        c_val = self.slider_phi_c.get()
+        pr_val = self.slider_pr_thresh.get()
+        
+        self.lbl_phi_q_val.config(text=f"{q_val:.2f}")
+        self.lbl_phi_y_val.config(text=f"{y_val:.2f}")
+        self.lbl_phi_c_val.config(text=f"{c_val:.2f}")
+        self.lbl_pr_thresh_val.config(text=f"{pr_val:.2f}")
+        
+        if hasattr(self, 'combo_presets') and self.combo_presets.get() != "Personalizado":
+            preset_name = self.combo_presets.get()
+            matches = False
+            if preset_name == "Examen alta exigencia (default)" and np.isclose(q_val, 0.3) and np.isclose(y_val, 0.4) and np.isclose(c_val, 0.3):
+                matches = True
+            elif preset_name == "Máxima precisión fáctica" and np.isclose(q_val, 0.5) and np.isclose(y_val, 0.3) and np.isclose(c_val, 0.2):
+                matches = True
+            elif preset_name == "Exploración de tema nuevo" and np.isclose(q_val, 0.2) and np.isclose(y_val, 0.3) and np.isclose(c_val, 0.5):
+                matches = True
+            elif preset_name == "Filtrado agresivo para examen" and np.isclose(q_val, 0.3) and np.isclose(y_val, 0.6) and np.isclose(c_val, 0.1):
+                matches = True
+                
+            if not matches:
+                self.combo_presets.set("Personalizado")
+                
+        self._refresh_lab_results_ui()
+
+    def _apply_lab_preset(self, event=None):
+        preset_name = self.combo_presets.get()
+        if preset_name == "Examen alta exigencia (default)":
+            self.slider_phi_q.set(0.30)
+            self.slider_phi_y.set(0.40)
+            self.slider_phi_c.set(0.30)
+        elif preset_name == "Máxima precisión fáctica":
+            self.slider_phi_q.set(0.50)
+            self.slider_phi_y.set(0.30)
+            self.slider_phi_c.set(0.20)
+        elif preset_name == "Exploración de tema nuevo":
+            self.slider_phi_q.set(0.20)
+            self.slider_phi_y.set(0.30)
+            self.slider_phi_c.set(0.50)
+        elif preset_name == "Filtrado agresivo para examen":
+            self.slider_phi_q.set(0.30)
+            self.slider_phi_y.set(0.60)
+            self.slider_phi_c.set(0.10)
+        
+        self._on_slider_change()
+
+    def _lab_add_card(self):
+        self._show_card_editor_dialog(None)
+
+    def _lab_edit_card(self):
+        selected = self.lab_tree.selection()
+        if not selected:
+            messagebox.showwarning("Selección vacía", "Por favor selecciona una flashcard para editar.")
+            return
+        idx = int(selected[0])
+        self._show_card_editor_dialog(idx)
+
+    def _lab_delete_card(self):
+        selected = self.lab_tree.selection()
+        if not selected:
+            messagebox.showwarning("Selección vacía", "Por favor selecciona una flashcard para eliminar.")
+            return
+        idx = int(selected[0])
+        if messagebox.askyesno("Confirmar eliminación", "¿Estás seguro de que deseas eliminar esta flashcard de prueba?"):
+            self.lab_cards.pop(idx)
+            self._update_lab_table()
+
+    def _show_card_editor_dialog(self, idx=None):
+        dialog = tk.Toplevel(self)
+        dialog.title("Editar Flashcard de Prueba" if idx is not None else "Agregar Flashcard de Prueba")
+        dialog.geometry("500x350")
+        dialog.minsize(400, 300)
+        dialog.grab_set()
+        
+        init_front = ""
+        init_back = ""
+        init_bloom = "Bloom II"
+        init_comment = ""
+        
+        if idx is not None:
+            card = self.lab_cards[idx]
+            init_front = card.get('front', '')
+            init_back = card.get('back', '')
+            init_bloom = card.get('bloom', 'Bloom II')
+            init_comment = card.get('comentario', '')
+            
+        frame = ttk.Frame(dialog, padding=15)
+        frame.pack(fill="both", expand=True)
+        
+        ttk.Label(frame, text="Pregunta:").pack(anchor="w", pady=2)
+        txt_front = tk.Text(frame, height=3, wrap="word")
+        txt_front.pack(fill="x", pady=2)
+        txt_front.insert("1.0", init_front)
+        
+        ttk.Label(frame, text="Respuesta:").pack(anchor="w", pady=2)
+        txt_back = tk.Text(frame, height=3, wrap="word")
+        txt_back.pack(fill="x", pady=2)
+        txt_back.insert("1.0", init_back)
+        
+        row_bloom = ttk.Frame(frame)
+        row_bloom.pack(fill="x", pady=5)
+        ttk.Label(row_bloom, text="Bloom Esperado:").pack(side="left", padx=(0, 10))
+        combo_bloom = ttk.Combobox(row_bloom, values=["Bloom I", "Bloom II", "Bloom III"], state="readonly", width=15)
+        combo_bloom.set(init_bloom)
+        combo_bloom.pack(side="left")
+        
+        ttk.Label(frame, text="Comentario:").pack(anchor="w", pady=2)
+        entry_comment = ttk.Entry(frame)
+        entry_comment.pack(fill="x", pady=2)
+        entry_comment.insert(0, init_comment)
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill="x", pady=(15, 0))
+        
+        def save():
+            front = txt_front.get("1.0", "end-1c").strip()
+            back = txt_back.get("1.0", "end-1c").strip()
+            bloom = combo_bloom.get()
+            comment = entry_comment.get().strip()
+            
+            if not front or not back:
+                messagebox.showerror("Campos vacíos", "Pregunta y Respuesta son campos obligatorios.")
+                return
+                
+            new_card = {
+                "front": front,
+                "back": back,
+                "bloom": bloom,
+                "comentario": comment
+            }
+            
+            if idx is not None:
+                self.lab_cards[idx] = new_card
+            else:
+                self.lab_cards.append(new_card)
+                
+            self._update_lab_table()
+            dialog.destroy()
+            
+        ttk.Button(btn_frame, text="Guardar", command=save).pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="Cancelar", command=dialog.destroy).pack(side="right", padx=5)
+
+    def _update_lab_table(self):
+        for item in self.lab_tree.get_children():
+            self.lab_tree.delete(item)
+            
+        for idx, card in enumerate(self.lab_cards):
+            self.lab_tree.insert(
+                "",
+                "end",
+                iid=str(idx),
+                values=(
+                    card['front'][:80],
+                    card['back'][:80],
+                    card['bloom'],
+                    card.get('comentario', '')
+                )
+            )
+
+    def _calculate_lab_metrics(self):
+        transcript = self.lab_text.get("1.0", "end-1c").strip()
+        if not self.lab_cards:
+            messagebox.showwarning("Sin datos", "Por favor agrega al menos una flashcard de prueba.")
+            return None
+            
+        concepts_map = {}
+        all_concepts = set()
+        
+        for idx, card in enumerate(self.lab_cards):
+            q_text = card['front']
+            ans_text = card['back']
+            
+            concept = "general"
+            combined_text = (q_text + " " + ans_text).lower()
+            words = re.findall(r'\b[a-záéíóúñ]{4,}\b', combined_text)
+            
+            if transcript:
+                trans_lower = transcript.lower()
+                matching = [w for w in words if w in trans_lower]
+                if matching:
+                    concept = max(matching, key=len)
+            else:
+                q_words = re.findall(r'\b[a-záéíóúñ]{4,}\b', q_text.lower())
+                if q_words:
+                    concept = max(q_words, key=len)
+            
+            concepts_map[idx] = concept
+            all_concepts.add(concept)
+            
+        pagerank = {}
+        if transcript and all_concepts:
+            try:
+                ranker = EduKGRanker()
+                ranker.build_graph(list(all_concepts), transcript)
+                pagerank = ranker.calculate_pagerank()
+            except Exception as e:
+                print(f"Error en EduKGRanker: {e}")
+            
+        raw_results = []
+        for idx, card in enumerate(self.lab_cards):
+            q_text = card['front']
+            ans_text = card['back']
+            bloom = card['bloom']
+            
+            words_ans = len(ans_text.split())
+            q_score = 1.0
+            if words_ans > 12:
+                q_score -= (words_ans - 12) * 0.04
+            q_score = max(0.1, min(1.0, q_score))
+            
+            b_num = 1 if bloom == "Bloom I" else 2 if bloom == "Bloom II" else 3
+                
+            concept = concepts_map[idx]
+            c_raw = pagerank.get(concept, 0.0)
+            
+            raw_results.append({
+                'idx': idx,
+                'card': card,
+                'concept': concept,
+                'q': q_score,
+                'bloom_num': b_num,
+                'c_raw': c_raw
+            })
+            
+        return raw_results
+
+    def _compute_scores_for_method(self, raw_results, method, w_q, w_y, w_c, pr_threshold):
+        all_c = [r['c_raw'] for r in raw_results]
+        
+        normalized_results = []
+        for r in raw_results:
+            c_raw = r['c_raw']
+            c_norm = 0.0
+            
+            if method == "Min-Max":
+                c_min = min(all_c)
+                c_max = max(all_c)
+                if c_max > c_min:
+                    c_norm = (c_raw - c_min) / (c_max - c_min)
+                else:
+                    c_norm = 1.0 if c_raw > 0 else 0.5
+            elif method == "Percentil":
+                if len(all_c) > 1:
+                    c_norm = np.mean([c <= c_raw for c in all_c])
+                else:
+                    c_norm = 1.0
+            elif method == "Z-Score":
+                if len(all_c) > 1:
+                    c_mean = np.mean(all_c)
+                    c_std = np.std(all_c)
+                    if c_std > 0:
+                        z = (c_raw - c_mean) / c_std
+                        c_norm = 1.0 / (1.0 + np.exp(-z))
+                    else:
+                        c_norm = 0.5
+                else:
+                    c_norm = 1.0
+            else: # Pesos (Raw PageRank)
+                c_norm = c_raw
+                
+            # Dinámico Y score en base a PageRank y Bloom
+            is_yield = (c_raw >= pr_threshold) and (r['bloom_num'] >= 2)
+            y_score = 1.0 if is_yield else 0.4
+            
+            score_final = w_q * r['q'] + w_y * y_score + w_c * c_norm
+            
+            normalized_results.append({
+                'card': r['card'],
+                'q': r['q'],
+                'y': y_score,
+                'c': c_norm,
+                'score': score_final
+            })
+            
+        normalized_results.sort(key=lambda x: x['score'], reverse=True)
+        return normalized_results
+
+    def _run_lab_simulation(self):
+        if not self.lab_cards:
+            messagebox.showwarning("Sin datos", "Por favor agrega al menos una flashcard de prueba.")
+            return
+            
+        use_ia = self.check_use_ia.get()
+        
+        if use_ia:
+            self.lbl_lab_status.config(text="⏳ Conectando con Gemini...")
+            self.btn_simulate.config(state="disabled")
+            self.btn_compare_norm.config(state="disabled")
+            threading.Thread(target=self._run_lab_simulation_thread, daemon=True).start()
+        else:
+            self.lbl_lab_status.config(text="⚡ Simulación Rápida (Heurística)")
+            self._run_lab_simulation_heuristic()
+
+    def _run_lab_simulation_thread(self):
+        try:
+            transcript = self.lab_text.get("1.0", "end-1c").strip()
+            
+            if not self.generator:
+                raise ValueError("Generador de contenido IA (Gemini) no configurado en la aplicación.")
+                
+            # Llamamos al watchdog del sistema
+            evals = self._watchdog_evaluate_with_explanation(transcript, self.lab_cards)
+            
+            # Extraer conceptos
+            concepts = [e.get('concepto', 'general') for e in evals]
+            
+            # Calcular PageRank
+            pagerank = {}
+            if transcript and concepts:
+                try:
+                    ranker = EduKGRanker()
+                    ranker.build_graph(concepts, transcript)
+                    pagerank = ranker.calculate_pagerank()
+                except Exception as e:
+                    print(f"Error en EduKGRanker: {e}")
+                    
+            # Construir raw_results
+            raw_results = []
+            for idx, card in enumerate(self.lab_cards):
+                eval_data = next((e for e in evals if e.get('original_id') == idx), None)
+                calidad = eval_data.get('calidad', 7) if eval_data else 7
+                bloom = eval_data.get('bloom', 2) if eval_data else 2
+                concept = eval_data.get('concepto', 'general') if eval_data else 'general'
+                
+                q_score = calidad / 10.0
+                c_raw = pagerank.get(concept, 0.0)
+                
+                raw_results.append({
+                    'idx': idx,
+                    'card': card,
+                    'concept': concept,
+                    'q': q_score,
+                    'bloom_num': bloom,
+                    'c_raw': c_raw
+                })
+                
+            self.after(0, lambda: self._on_lab_simulation_success(raw_results))
+            
+        except Exception as e:
+            self.after(0, lambda err=str(e): self._on_lab_simulation_error(err))
+
+    def _on_lab_simulation_success(self, raw_results):
+        self.lbl_lab_status.config(text="✅ Evaluación IA completada.")
+        self.btn_simulate.config(state="normal")
+        self.btn_compare_norm.config(state="normal")
+        self.last_raw_results = raw_results
+        self._refresh_lab_results_ui()
+
+    def _on_lab_simulation_error(self, err_msg):
+        self.lbl_lab_status.config(text="❌ Falló evaluación IA.")
+        self.btn_simulate.config(state="normal")
+        self.btn_compare_norm.config(state="normal")
+        messagebox.showerror("Error de Simulación IA", f"Hubo un problema llamando a la IA:\n{err_msg}\n\nSe usará la simulación heurística local como fallback.")
+        self._run_lab_simulation_heuristic()
+
+    def _run_lab_simulation_heuristic(self):
+        raw_results = self._calculate_lab_metrics()
+        if not raw_results:
+            return
+        self.last_raw_results = raw_results
+        self._refresh_lab_results_ui()
+
+    def _refresh_lab_results_ui(self):
+        if not hasattr(self, 'last_raw_results') or not self.last_raw_results:
+            return
+            
+        method = self.combo_norm.get()
+        w_q = self.slider_phi_q.get()
+        w_y = self.slider_phi_y.get()
+        w_c = self.slider_phi_c.get()
+        
+        # Calcular el umbral dinámico de PageRank del slider
+        all_c = [r['c_raw'] for r in self.last_raw_results]
+        corte_val = self.slider_pr_thresh.get()
+        pr_threshold = float(np.percentile(all_c, corte_val * 100)) if all_c else 0.0
+        
+        results = self._compute_scores_for_method(self.last_raw_results, method, w_q, w_y, w_c, pr_threshold)
+        
+        for item in self.lab_res_tree.get_children():
+            self.lab_res_tree.delete(item)
+            
+        for r in results:
+            self.lab_res_tree.insert(
+                "",
+                "end",
+                values=(
+                    r['card']['front'][:80],
+                    f"{r['q']:.2f}",
+                    f"{r['y']:.2f}",
+                    f"{r['c']:.2f}",
+                    f"{r['score']:.2f}"
+                )
+            )
+            
+        self.lab_txt_best.config(state="normal")
+        self.lab_txt_worst.config(state="normal")
+        
+        self.lab_txt_best.delete("1.0", "end")
+        self.lab_txt_worst.delete("1.0", "end")
+        
+        top_cards = results[:3]
+        for idx, r in enumerate(top_cards):
+            medals = ["🏆 1º", "🥈 2º", "🥉 3º"]
+            medal = medals[idx] if idx < len(medals) else "⭐"
+            self.lab_txt_best.insert("end", f"{medal} [{r['score']:.2f}] {r['card']['front'][:60]}...\n")
+            
+        bottom_cards = list(reversed(results))[:3]
+        for idx, r in enumerate(bottom_cards):
+            self.lab_txt_worst.insert("end", f"🔴 [{r['score']:.2f}] {r['card']['front'][:60]}...\n")
+            
+        self.lab_txt_best.config(state="disabled")
+        self.lab_txt_worst.config(state="disabled")
+
+    def _compare_lab_normalizations(self):
+        raw_results = getattr(self, 'last_raw_results', None)
+        if not raw_results:
+            raw_results = self._calculate_lab_metrics()
+            
+        if not raw_results:
+            return
+            
+        w_q = self.slider_phi_q.get()
+        w_y = self.slider_phi_y.get()
+        w_c = self.slider_phi_c.get()
+        
+        # Calcular el umbral dinámico de PageRank del slider
+        all_c = [r['c_raw'] for r in raw_results]
+        corte_val = self.slider_pr_thresh.get()
+        pr_threshold = float(np.percentile(all_c, corte_val * 100)) if all_c else 0.0
+        
+        res_minmax = self._compute_scores_for_method(raw_results, "Min-Max", w_q, w_y, w_c, pr_threshold)
+        res_percentil = self._compute_scores_for_method(raw_results, "Percentil", w_q, w_y, w_c, pr_threshold)
+        res_zscore = self._compute_scores_for_method(raw_results, "Z-Score", w_q, w_y, w_c, pr_threshold)
+        
+        compare_win = tk.Toplevel(self)
+        compare_win.title("🔄 Comparación Rápida de Normalizaciones (C)")
+        compare_win.geometry("950x450")
+        compare_win.minsize(800, 350)
+        compare_win.grab_set()
+        
+        info_frame = ttk.Frame(compare_win, padding=10)
+        info_frame.pack(fill="x")
+        ttk.Label(info_frame, text=f"Comparativa lado a lado utilizando pesos: ΦQ={w_q:.2f}, ΦY={w_y:.2f}, ΦC={w_c:.2f}", 
+                  font=("Segoe UI", 10, "italic")).pack(anchor="w")
+                  
+        panels_frame = ttk.Frame(compare_win, padding=10)
+        panels_frame.pack(fill="both", expand=True)
+        
+        panels_frame.columnconfigure(0, weight=1)
+        panels_frame.columnconfigure(1, weight=1)
+        panels_frame.columnconfigure(2, weight=1)
+        
+        def create_ranking_table(parent, title, results):
+            frame = ttk.LabelFrame(parent, text=title, padding=5)
+            
+            cols = ("rank", "card", "score")
+            tree = ttk.Treeview(frame, columns=cols, show="headings")
+            tree.heading("rank", text="Puesto")
+            tree.heading("card", text="Flashcard")
+            tree.heading("score", text="Score Final")
+            
+            tree.column("rank", width=50, stretch=False, anchor="center")
+            tree.column("card", width=180)
+            tree.column("score", width=80, stretch=False, anchor="center")
+            
+            for rank, r in enumerate(results, 1):
+                tree.insert("", "end", values=(rank, r['card']['front'][:45], f"{r['score']:.2f}"))
+                
+            tree.pack(fill="both", expand=True)
+            return frame
+            
+        f1 = create_ranking_table(panels_frame, "Ranking Min-Max", res_minmax)
+        f1.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        
+        f2 = create_ranking_table(panels_frame, "Ranking Percentil", res_percentil)
+        f2.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
+        
+        f3 = create_ranking_table(panels_frame, "Ranking Z-Score", res_zscore)
+        f3.grid(row=0, column=2, padx=5, pady=5, sticky="nsew")
+        
+        btn_close = ttk.Button(compare_win, text="Cerrar", command=compare_win.destroy)
+        btn_close.pack(pady=10)
+
+    def _load_lab_case(self, event):
+        case_name = self.combo_cases.get()
+        if case_name == "Detección de ruido":
+            transcript = (
+                "El ciclo del agua es el proceso de circulación del agua en la Tierra. "
+                "La evaporación ocurre cuando el sol calienta el agua líquida y esta sube en forma de vapor. "
+                "Por otro lado, ayer el instructor tomó café en una taza roja en la oficina. "
+                "Luego, la condensación se produce cuando el vapor se enfría y forma nubes. "
+                "Hubo una charla sobre fútbol a mediodía. "
+                "Finalmente, la precipitación ocurre cuando el agua cae de las nubes en forma de lluvia."
+            )
+            cards = [
+                {
+                    "front": "¿Qué es la evaporación en el ciclo del agua?",
+                    "back": "El paso de agua líquida a vapor debido al calentamiento solar.",
+                    "bloom": "Bloom II",
+                    "comentario": "Concepto central y bien formulado."
+                },
+                {
+                    "front": "¿De qué color era la taza de café del instructor?",
+                    "back": "Taza roja.",
+                    "bloom": "Bloom I",
+                    "comentario": "Información totalmente irrelevante (ruido)."
+                },
+                {
+                    "front": "¿Qué es la condensación?",
+                    "back": "El proceso donde el vapor de agua se enfría y se convierte en líquido.",
+                    "bloom": "Bloom II",
+                    "comentario": "Concepto clave del ciclo."
+                },
+                {
+                    "front": "¿De qué hablaron los empleados a mediodía?",
+                    "back": "De fútbol.",
+                    "bloom": "Bloom I",
+                    "comentario": "Otro detalle ruidoso e irrelevante."
+                }
+            ]
+        elif case_name == "Bloom I vs II vs III":
+            transcript = (
+                "La Ley de Ohm establece la relación entre voltaje, corriente y resistencia. "
+                "La fórmula fundamental es V = I * R. "
+                "Voltaje (V) es la diferencia de potencial medida en Voltios. "
+                "Corriente (I) es el flujo de carga medida en Amperios. "
+                "Resistencia (R) es la oposición al flujo medida en Ohmios. "
+                "Si la resistencia se reduce a la mitad, la corriente se duplica para un voltaje constante."
+            )
+            cards = [
+                {
+                    "front": "¿Qué significa la letra 'V' en la fórmula de la Ley de Ohm?",
+                    "back": "Voltaje.",
+                    "bloom": "Bloom I",
+                    "comentario": "Nivel recordar: memorización simple del símbolo."
+                },
+                {
+                    "front": "¿Por qué aumenta la corriente si la resistencia disminuye con voltaje constante?",
+                    "back": "Porque la corriente es inversamente proporcional a la resistencia según la Ley de Ohm.",
+                    "bloom": "Bloom II",
+                    "comentario": "Nivel entender: requiere comprender la relación conceptual."
+                },
+                {
+                    "front": "Si un circuito tiene un voltaje de 12V y una resistencia de 6 Ohmios, ¿cuál es la corriente?",
+                    "back": "2 Amperios. Se calcula usando I = V / R, donde I = 12 / 6 = 2.",
+                    "bloom": "Bloom III",
+                    "comentario": "Nivel aplicar: requiere resolver un ejercicio práctico con la fórmula."
+                }
+            ]
+        elif case_name == "Concepto central vs periférico":
+            transcript = (
+                "La criptografía simétrica utiliza una única clave secreta para cifrar y descifrar la información. "
+                "El algoritmo estándar para criptografía simétrica es AES. "
+                "La criptografía simétrica requiere que el emisor y receptor compartan la clave de forma segura. "
+                "Un detalle histórico menor es que el concurso para elegir AES se inició en 1997."
+            )
+            cards = [
+                {
+                    "front": "¿Cuál es la característica principal de la criptografía simétrica?",
+                    "back": "Que utiliza la misma clave para cifrar y descifrar los datos.",
+                    "bloom": "Bloom II",
+                    "comentario": "Concepto central con alta frecuencia y centralidad."
+                },
+                {
+                    "front": "¿En qué año se inició el concurso para elegir el estándar AES?",
+                    "back": "En 1997.",
+                    "bloom": "Bloom I",
+                    "comentario": "Dato periférico e histórico secundario (baja centralidad)."
+                }
+            ]
+        else:
+            return
+            
+        self.lab_text.delete("1.0", "end")
+        self.lab_text.insert("1.0", transcript)
+        
+        self.lab_cards = cards
+        self._update_lab_table()
+
+    def _extract_pdf_with_ia_thread(self, pdf_path: str, force_ocr: bool):
+        """Inicia un hilo en segundo plano para transcribir el PDF con Gemini."""
+        progress_win = tk.Toplevel(self)
+        progress_win.title("📄 Transcribiendo PDF con Gemini")
+        progress_win.geometry("450x180")
+        progress_win.resizable(False, False)
+        progress_win.grab_set()
+        
+        main_frame = ttk.Frame(progress_win, padding=20)
+        main_frame.pack(fill="both", expand=True)
+        
+        lbl_msg = ttk.Label(main_frame, text="Procesando archivo PDF con Gemini Vision OCR...\nEste proceso puede tomar un momento por página.", wrap=True)
+        lbl_msg.pack(fill="x", pady=(0, 10))
+        
+        pb = ttk.Progressbar(main_frame, mode="indeterminate")
+        pb.pack(fill="x", pady=10)
+        pb.start(10)
+        
+        def run_extraction():
+            try:
+                # Inicializar generador si no existe
+                if not self.app.flashcard_generator:
+                    active_config = self.app.config_manager.get_active_set()
+                    from gemini_flashcard_generator import GeminiFlashcardGenerator
+                    self.app.flashcard_generator = GeminiFlashcardGenerator(
+                        log_callback=self.app._mode_log,
+                        config_set=active_config
+                    )
+                
+                # Ejecutar extracción
+                extraction_mode = 2 if force_ocr else 1
+                text = self.app.flashcard_generator.extract_text_from_pdf_file(pdf_path, extraction_mode=extraction_mode)
+                
+                if text:
+                    self.after(0, lambda: self._set_source_context(text, f"Gemini OCR ({os.path.basename(pdf_path)})"))
+                    self.after(0, lambda: messagebox.showinfo("Éxito", f"Se ha extraído y cargado el contenido del PDF con Gemini correctamente."))
+                else:
+                    self.after(0, lambda: messagebox.showerror("Error", "No se pudo obtener texto del PDF usando Gemini."))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Error", f"Error durante la extracción de IA:\n{e}"))
+            finally:
+                self.after(0, progress_win.destroy)
+                
+        threading.Thread(target=run_extraction, daemon=True).start()
+
+    def _set_source_context(self, content: str, source_label: str):
+        if not content:
+            messagebox.showwarning("Archivo Vacío", "No se pudo obtener texto del archivo seleccionado.")
+            return
+            
+        if self.app:
+            self.app.current_source_context = content
+            
+        char_count = len(content)
+        self.lbl_source_status.config(text="✅ Fuente cargada", foreground="green")
+        self.lbl_source_info.config(text=f"Fuente de {char_count:,} caracteres cargada desde {source_label}.", foreground="black")
 
 class TranscriptionProgressUI(tk.Toplevel):
     def __init__(self, parent, segments, app, on_complete_callback):

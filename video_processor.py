@@ -14,6 +14,7 @@ import shutil
 
 # Gemini API para transcripción multimodal
 import time
+import socket
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
@@ -270,6 +271,28 @@ class VideoProcessor:
         self._log(f"⚠️ Usando duración estimada: {estimated_duration/60:.1f} min")
         return estimated_duration
     
+    def _check_internet_connection(self, host="8.8.8.8", port=53, timeout=3) -> bool:
+        """Verifica si hay una conexión de red activa."""
+        try:
+            socket.setdefaulttimeout(timeout)
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+            return True
+        except Exception:
+            try:
+                socket.gethostbyname("generativelanguage.googleapis.com")
+                return True
+            except Exception:
+                return False
+
+    def _wait_for_connection(self, log_fn=None, reason="operación de red"):
+        """Pausa la ejecución si no hay conexión a internet y espera hasta que regrese."""
+        log = log_fn or self._log
+        if not self._check_internet_connection():
+            log(f"\n⚠️ [RED] Sin conexión a internet ({reason}). Pausando y esperando reconexión...")
+            while not self._check_internet_connection():
+                time.sleep(5)
+            log("✅ [RED] Conexión a internet restablecida. Continuando con la tarea...\n")
+
     def _get_gemini_client(self):
         """Devuelve el cliente Gemini usando la API Key actual."""
         if not self.api_keys:
@@ -277,30 +300,44 @@ class VideoProcessor:
         return genai.Client(api_key=self.api_keys[self.current_key_index])
 
     def _upload_file_with_retry(self, client, file_path: str, max_retries: int = 5, initial_delay: float = 2.0):
-        """Sube un archivo a Gemini con reintentos para fallas de red."""
+        """Sube un archivo a Gemini con reintentos para fallas de red e internet persistente."""
         last_exception = None
         delay = initial_delay
+        attempt = 0
         
-        for attempt in range(max_retries):
+        while attempt < max_retries:
+            # Aseguramos conexión antes de iniciar la subida
+            self._wait_for_connection(reason="subida de archivo")
+            
             try:
                 return client.files.upload(file=file_path)
             except Exception as e:
                 last_exception = e
-                error_str = str(e)
-                # Detectar errores comunes de conexión (incluyendo 10054)
-                is_connection_error = any(msg in error_str.lower() for msg in [
-                    "connection", "10054", "reset", "broken pipe", "timeout", "network"
+                error_str = str(e).lower()
+                
+                # Detectar errores de conexión
+                is_connection_error = any(msg in error_str for msg in [
+                    "connection", "10054", "reset", "broken pipe", "timeout", "network", "dns", "unreachable", "host"
                 ])
                 
                 if is_connection_error:
+                    # Si no hay conexión a internet real, pausamos y esperamos a que vuelva
+                    if not self._check_internet_connection():
+                        self._wait_for_connection(reason="reintento de subida tras desconexión")
+                        self._log(f"   🔄 Reintentando subida de archivo tras restaurarse la red...")
+                        delay = initial_delay  # Reset delay
+                        continue
+                    
+                    # Si sí hay internet pero falló por un problema transitorio de conexión
                     remaining = max_retries - attempt - 1
                     if remaining > 0:
-                        self._log(f"   ⚠️ Error de conexión al subir ({error_str}). Reintentando en {delay}s... ({remaining} intentos restantes)")
+                        self._log(f"   ⚠️ Error de conexión al subir ({e}). Reintentando en {delay}s... ({remaining} intentos restantes)")
                         time.sleep(delay)
                         delay *= 2  # Backoff exponencial
+                        attempt += 1
                         continue
                 
-                # Si no es un error de conexión conocido o no quedan intentos, propagar
+                # Si no es un error de conexión o ya no hay reintentos transitorios
                 self._log(f"   ❌ Error crítico subiendo a Gemini: {e}")
                 raise e
         
@@ -314,17 +351,17 @@ class VideoProcessor:
         return self.current_key_index != 0
 
     def _generate_with_fallback(self, file_obj, prompt: str) -> str:
-        """Genera contenido usando el pool de modelos con reintentos por rate limit.
-        
-        IMPORTANTE: Los archivos subidos a Gemini están vinculados a la API Key
-        que los subió. NO se puede rotar a otra key para acceder al mismo archivo.
-        """
+        """Genera contenido usando el pool de modelos con reintentos por rate limit e internet."""
         max_retries = 3  # Reintentos por rate limit por modelo
         
         for model_name in self.models_pool:
             self._log(f"   🤖 Intentando con modelo {model_name}...")
             
-            for attempt in range(max_retries):
+            attempt = 0
+            while attempt < max_retries:
+                # Asegurar conexión antes de intentar
+                self._wait_for_connection(reason=f"generación con {model_name}")
+                
                 client = self._get_gemini_client()
                 try:
                     response = client.models.generate_content(
@@ -336,11 +373,24 @@ class VideoProcessor:
                 except Exception as e:
                     error_str = str(e).lower()
                     
+                    # Detectar problemas de conexión a internet
+                    is_connection_error = any(msg in error_str for msg in [
+                        "connection", "10054", "reset", "broken pipe", "timeout", "network", "dns", "unreachable", "host"
+                    ])
+                    
+                    if is_connection_error:
+                        if not self._check_internet_connection():
+                            self._log(f"   ⚠️ Conexión de red fallida durante generación. Esperando reconexión...")
+                            self._wait_for_connection(reason="generación de contenido tras desconexión")
+                            self._log(f"   🔄 Reintentando generación con modelo {model_name}...")
+                            continue  # Reintenta el mismo intento
+                    
                     if "429" in error_str or "quota" in error_str or "exhausted" in error_str:
                         wait_time = 30 * (attempt + 1)
                         if attempt < max_retries - 1:
                             self._log(f"   ⏳ Rate limit en {model_name}. Esperando {wait_time}s...")
                             time.sleep(wait_time)
+                            attempt += 1
                             continue
                         else:
                             self._log(f"   ⚠️ Modelo {model_name} agotado tras {max_retries} intentos. Probando siguiente modelo...")
@@ -651,9 +701,26 @@ class VideoProcessor:
                 myfile = self._upload_file_with_retry(client, segment.audio_path)
                 
                 self._log(f"   ⏳ Esperando procesamiento en la nube...")
-                while myfile.state.name == "PROCESSING":
-                    time.sleep(3)
-                    myfile = client.files.get(name=myfile.name)
+                while True:
+                    self._wait_for_connection(reason="consultar estado del segmento subido")
+                    try:
+                        myfile = client.files.get(name=myfile.name)
+                        if myfile.state.name != "PROCESSING":
+                            break
+                        time.sleep(3)
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        is_connection_error = any(msg in error_str for msg in [
+                            "connection", "10054", "reset", "broken pipe", "timeout", "network", "dns", "unreachable", "host"
+                        ])
+                        if is_connection_error:
+                            self._log(f"   ⚠️ Error de conexión consultando estado del segmento: {e}. Esperando reconexión...")
+                            self._wait_for_connection(reason="consultar estado tras desconexión")
+                            continue
+                        else:
+                            self._log(f"   ❌ Error inesperado consultando estado del segmento: {e}")
+                            time.sleep(3)
+                            break
                     
                 if myfile.state.name == "FAILED":
                     self._log(f"   ❌ Falla en servidor de Gemini.")
@@ -893,11 +960,28 @@ class VideoProcessor:
         
         # Fase 2: Esperar procesamiento de todos los archivos en los servidores de Google
         self._log(f"\n⏳ [Fase 2] Esperando que Google procese los archivos (Estado ACTIVE)...")
-        for seg_id, myfile in uploaded_files.items():
-            while myfile.state.name == "PROCESSING":
-                time.sleep(3)
-                myfile = client.files.get(name=myfile.name)
-                uploaded_files[seg_id] = myfile
+        for seg_id, myfile in list(uploaded_files.items()):
+            while True:
+                self._wait_for_connection(reason=f"consultar estado del segmento {seg_id}")
+                try:
+                    myfile = client.files.get(name=myfile.name)
+                    uploaded_files[seg_id] = myfile
+                    if myfile.state.name != "PROCESSING":
+                        break
+                    time.sleep(3)
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_connection_error = any(msg in error_str for msg in [
+                        "connection", "10054", "reset", "broken pipe", "timeout", "network", "dns", "unreachable", "host"
+                    ])
+                    if is_connection_error:
+                        self._log(f"   ⚠️ Error de conexión consultando estado del segmento {seg_id}: {e}. Esperando reconexión...")
+                        self._wait_for_connection(reason="consultar estado tras desconexión")
+                        continue
+                    else:
+                        self._log(f"   ❌ Error inesperado consultando estado del segmento {seg_id}: {e}")
+                        time.sleep(3)
+                        break
             
             if myfile.state.name == "FAILED":
                 self._log(f"   ❌ Falla en servidor de Gemini para segmento {seg_id}.")
@@ -1200,11 +1284,28 @@ class VideoProcessor:
         
         # 6. Esperar procesamiento
         log(f"\n⏳ Esperando procesamiento en Gemini...")
-        for seg_id, myfile in uploaded_files.items():
-            while myfile.state.name == "PROCESSING":
-                time.sleep(3)
-                myfile = client.files.get(name=myfile.name)
-                uploaded_files[seg_id] = myfile
+        for seg_id, myfile in list(uploaded_files.items()):
+            while True:
+                self._wait_for_connection(log_fn=log, reason=f"consultar estado del segmento {seg_id}")
+                try:
+                    myfile = client.files.get(name=myfile.name)
+                    uploaded_files[seg_id] = myfile
+                    if myfile.state.name != "PROCESSING":
+                        break
+                    time.sleep(3)
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_connection_error = any(msg in error_str for msg in [
+                        "connection", "10054", "reset", "broken pipe", "timeout", "network", "dns", "unreachable", "host"
+                    ])
+                    if is_connection_error:
+                        log(f"   ⚠️ Error de conexión consultando estado del segmento {seg_id}: {e}. Esperando reconexión...")
+                        self._wait_for_connection(log_fn=log, reason="consultar estado tras desconexión")
+                        continue
+                    else:
+                        log(f"   ❌ Error inesperado consultando estado del segmento {seg_id}: {e}")
+                        time.sleep(3)
+                        break
             
             if myfile.state.name == "FAILED":
                 log(f"   ❌ Falla en servidor para segmento {seg_id}")

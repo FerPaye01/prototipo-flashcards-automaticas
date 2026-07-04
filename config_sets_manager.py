@@ -506,6 +506,99 @@ NO agregues introducciones, confirmaciones, resúmenes ni conclusiones."""
 }
 
 
+DEFAULT_PROMPTS7 = {
+    "forensic_analyst": """Rol: Analista Forense de Sistemas Cognitivos y Flujos Lógicos.
+
+Objetivo: Analizar el [Input_Técnico] (compuesto por Consigna, Algoritmo y Resumen) y generar flashcards de análisis de flujo donde la pregunta "P:" proporcione un resumen explícito del contexto, los parámetros involucrados y la condición lógica exacta a evaluar.
+
+Entradas:
+[Input_Técnico]: {texto_ocr}
+
+⛔ RESTRICCIONES MAESTRAS:
+1. Cuota Máxima Estricta: Genera de 1 a 3 flashcards como máximo.
+2. Exclusividad de Dominio: PROHIBIDO pedir bloques de código literal y PROHIBIDO evaluar complejidades Big-O. Enfócate en la lógica del flujo de control y la gestión de estados.
+3. Construcción Granular del Anverso (P:): La pregunta DEBE ser auto-contenida. Extrae del [Input_Técnico] y detalla explícitamente:
+   - El contexto o escenario del componente.
+   - Un resumen granular de la mecánica que se está ejecutando.
+   - Los parámetros o variables lógicas involucradas.
+   - La condición límite o caso de fallo exacto a evaluar.
+4. Atomización de Respuesta (R:): Debe ser un único bloque conciso de máximo 3 líneas de texto plano que explique la consecuencia lógica. PROHIBIDO duplicar la etiqueta R:.
+
+Formato de Salida Requerida (Estricto):
+P: [Contexto] - [Mecánica]: [Resumen granular del escenario del algoritmo/código con sus parámetros]. Ante la condición límite [X], ¿cómo gestiona internamente el flujo de control esta situación?
+R: [Consecuencia lógica directa].
+
+No agregues introducciones, saludos ni confirmaciones. Devuelve solo los pares P/R.""",
+
+    "environment_architect": """Rol: Arquitecto de Infraestructura, Confiabilidad (SRE) y Complejidad Computacional.
+
+Objetivo: Analizar el [Input_Técnico] (Consigna, Algoritmo y Resumen) y generar flashcards de diseño arquitectónico donde la pregunta "P:" detalle con precisión el escenario de carga, las restricciones de entorno y las métricas del sistema.
+
+Entradas:
+[Input_Técnico]: {texto_ocr}
+
+⛔ RESTRICCIONES MAESTRAS:
+1. Cuota Máxima Estricta: Genera 1 o 2 flashcards de alta densidad teórica.
+2. Exclusividad de Dominio: PROHIBIDO pedir código y PROHIBIDO evaluar el flujo de control básico de bucles. Enfócate en recursos, Big-O, restricciones físicas y compensaciones (trade-offs).
+3. Construcción Granular del Anverso (P:): La pregunta DEBE ser auto-contenida. Extrae del [Input_Técnico] y detalla explícitamente:
+   - El ecosistema o patrón tecnológico evaluado.
+   - Un resumen granular de las restricciones impuestas por la consigna o el entorno de ejecución.
+   - Los parámetros de volumen o escala involucrados (ej. tamaño de datos, límites del framework).
+   - El riesgo de infraestructura o trade-off de rendimiento específico a analizar.
+4. Atomización de Respuesta (R:): Directa, usando terminología de ingeniería en un máximo de 3 líneas.
+
+Formato de Salida Requerida (Estricto):
+P: [Tecnología/Patrón] - [Métrica]: [Resumen granular de la arquitectura con sus restricciones de diseño y parámetros de escala]. ¿Cuál es el costo computacional o riesgo de infraestructura de esta decisión y qué trade-off penaliza?
+R: [Análisis técnico analítico].
+
+No agregues introducciones, saludos ni confirmaciones. Devuelve solo los pares P/R.""",
+
+    "speedrun_trainer": """Rol: Entrenador de Velocidad Mecánica y Sintaxis Estructural para Competición.
+
+Objetivo: Analizar el [Input_Técnico] (Consigna, Algoritmo y Resumen) y generar flashcards de código atómico donde la pregunta "P:" actúe como una especificación técnica granular (mini-contrato) que defina exactamente el estado inicial, las variables disponibles y el resultado esperado.
+
+Entradas:
+[Input_Técnico]: {texto_ocr}
+
+⛔ RESTRICCIONES MAESTRAS:
+1. Cuota Máxima Estricta: Genera 1 o 2 flashcards de velocidad mecánica pura.
+2. Exclusividad de Dominio: PROHIBIDO incluir explicaciones teóricas o análisis Big-O. Tu único universo es la sintaxis física y estructural.
+3. Canonicidad de Variables: PROHIBIDO usar nombres de variables hiper-específicos de la narrativa del negocio (ej. 'ice_creams'). Reemplázalos por identificadores estándar de la industria (nums, target, res, freq, app, ctx).
+4. Construcción Granular del Anverso (P:): La pregunta DEBE ser un mini-contrato de desarrollo. Extrae del [Input_Técnico] y detalla explícitamente:
+   - El framework, herramienta o patrón algorítmico a codificar.
+   - Un resumen granular de la tarea de implementación.
+   - Parámetros Disponibles: El estado de las variables e insumos de entrada iniciales.
+   - Resultado Esperado: Las restricciones sintácticas y la mutación o retorno exacto que debe realizar el bloque.
+5. Atomización de Respuesta (R:): El reverso debe ser estrictamente un bloque de código compacto (máximo 4-5 líneas) enfocado en el modismo estructural.
+
+Formato de Salida Requerida (Estricto):
+P: [Framework/Algoritmo] - [Sintaxis]: [Resumen granular del requerimiento técnico]. [Disponibles: variables/estado inicial -> Esperado: comportamiento estructural exacto].
+R: 
+```[lenguaje]
+[Bloque de código atómico]
+```
+
+No agregues introducciones, saludos ni confirmaciones. Devuelve solo los pares P/R."""
+}
+
+
+DEFAULT_CONFIG_SET_SPECIALIST = {
+    "name": "Especialista Técnico",
+    "description": "3 roles técnicos avanzados: Analista Forense (lógica), Arquitecto de Entorno (SRE/Big-O), Entrenador Speedrun (sintaxis/código)",
+    "model": "gemini-3-flash-preview",
+    "wait_time": 60,
+    "replace_mode": False,
+    "active_types": {
+        "forensic_analyst": True,
+        "environment_architect": True,
+        "speedrun_trainer": True
+    },
+    "prompts": DEFAULT_PROMPTS7.copy(),
+    "created_at": "",
+    "updated_at": ""
+}
+
+
 # Set de configuración por defecto
 DEFAULT_CONFIG_SET = {
     "name": "Por Defecto",
@@ -675,6 +768,15 @@ class ConfigSetsManager:
             exam_faithful["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             exam_faithful["updated_at"] = exam_faithful["created_at"]
             self.config_sets["Examen Fiel"] = exam_faithful
+        
+        # Asegurar que existe el set de Especialista Técnico
+        if "Especialista Técnico" not in self.config_sets:
+            specialist = DEFAULT_CONFIG_SET_SPECIALIST.copy()
+            specialist["prompts"] = DEFAULT_PROMPTS7.copy()
+            specialist["active_types"] = DEFAULT_CONFIG_SET_SPECIALIST["active_types"].copy()
+            specialist["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            specialist["updated_at"] = specialist["created_at"]
+            self.config_sets["Especialista Técnico"] = specialist
         
         self._save_config_sets()
     
@@ -863,6 +965,8 @@ class ConfigSetsManager:
             return DEFAULT_PROMPTS5[card_type]
         elif card_type in DEFAULT_PROMPTS6:
             return DEFAULT_PROMPTS6[card_type]
+        elif card_type in DEFAULT_PROMPTS7:
+            return DEFAULT_PROMPTS7[card_type]
         return ""
     
     def reset_prompt_to_default(self, set_name: str, card_type: str) -> bool:
@@ -871,7 +975,7 @@ class ConfigSetsManager:
             return False
         
         for prompt_dict in [DEFAULT_PROMPTS, DEFAULT_PROMPTS2, DEFAULT_PROMPTS3, 
-                            DEFAULT_PROMPTS4, DEFAULT_PROMPTS5, DEFAULT_PROMPTS6]:
+                            DEFAULT_PROMPTS4, DEFAULT_PROMPTS5, DEFAULT_PROMPTS6, DEFAULT_PROMPTS7]:
             if card_type in prompt_dict:
                 self.config_sets[set_name]["prompts"][card_type] = prompt_dict[card_type]
                 self.config_sets[set_name]["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")

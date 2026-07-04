@@ -6,6 +6,7 @@ Procesa imágenes, video, audio y PDF para generar flashcards pedagógicas de al
 import os
 import threading
 import time
+import socket
 import json
 import re
 from typing import List, Dict, Any, Callable, Optional, Tuple
@@ -16,7 +17,7 @@ import google.generativeai as genai
 from PIL import Image
 from config_sets_manager import (DEFAULT_PROMPTS, DEFAULT_PROMPTS2, DEFAULT_PROMPTS3,
                                  DEFAULT_PROMPTS4, DEFAULT_PROMPTS5, DEFAULT_PROMPTS6,
-                                 SOURCE_CONTEXT_INSTRUCTION)
+                                 DEFAULT_PROMPTS7, SOURCE_CONTEXT_INSTRUCTION)
 from qyi_evaluator import QYIEvaluator, EduKGRanker
 
 # Tesseract OCR como fallback
@@ -76,7 +77,8 @@ class GeminiFlashcardGenerator:
     TYPE_TO_API_INDEX = {
         "basic": 1, "multiple_choice": 2, "cloze": 3, "vocabulary": 4,
         "level_1_cloze": 1, "level_2_relations": 2, "level_3_application": 3, "level_4_analysis": 4,
-        "atomic_extraction": 1, "high_performance_architect": 1, "exam_pareto": 1, "exam_faithful": 1
+        "atomic_extraction": 1, "high_performance_architect": 1, "exam_pareto": 1, "exam_faithful": 1,
+        "forensic_analyst": 1, "environment_architect": 2, "speedrun_trainer": 3
     }
 
     def __init__(self, log_callback: Optional[Callable[[str], None]] = None, 
@@ -125,6 +127,105 @@ class GeminiFlashcardGenerator:
     def _is_content_sufficient(self, text: str) -> bool:
         return len(text.strip()) >= MIN_CONTENT_CHARS
 
+    def _check_internet_connection(self, host="8.8.8.8", port=53, timeout=3) -> bool:
+        """Verifica si hay una conexión de red activa."""
+        try:
+            socket.setdefaulttimeout(timeout)
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+            return True
+        except Exception:
+            try:
+                socket.gethostbyname("generativelanguage.googleapis.com")
+                return True
+            except Exception:
+                return False
+
+    def _wait_for_connection(self, reason="operación de red"):
+        """Pausa la ejecución si no hay conexión a internet y espera hasta que regrese."""
+        if not self._check_internet_connection():
+            self._log(f"\n⚠️ [RED] Sin conexión a internet ({reason}). Pausando y esperando reconexión...")
+            while not self._check_internet_connection():
+                time.sleep(5)
+            self._log("✅ [RED] Conexión a internet restablecida. Continuando con la tarea...\n")
+
+    def _upload_file_with_retry(self, file_path: str, max_retries: int = 5, initial_delay: float = 2.0):
+        """Sube un archivo a Gemini con reintentos para fallas de red e internet persistente."""
+        last_exception = None
+        delay = initial_delay
+        attempt = 0
+        
+        while attempt < max_retries:
+            self._wait_for_connection(reason="subida de archivo multimodal")
+            
+            try:
+                return genai.upload_file(file_path)
+            except Exception as e:
+                last_exception = e
+                error_str = str(e).lower()
+                
+                # Detectar errores de conexión o lectura/timeout
+                is_connection_error = any(msg in error_str for msg in [
+                    "connection", "10054", "reset", "broken pipe", "timeout", "network", "dns", "unreachable", "host", "read operation timed out"
+                ])
+                
+                if is_connection_error:
+                    if not self._check_internet_connection():
+                        self._wait_for_connection(reason="reintento de subida tras desconexión")
+                        self._log(f"   🔄 Reintentando subida de archivo tras restaurarse la red...")
+                        delay = initial_delay  # Reset delay
+                        continue
+                    
+                    remaining = max_retries - attempt - 1
+                    if remaining > 0:
+                        self._log(f"   ⚠️ Error de conexión/lectura al subir ({e}). Reintentando en {delay}s... ({remaining} intentos restantes)")
+                        time.sleep(delay)
+                        delay *= 2  # Backoff exponencial
+                        attempt += 1
+                        continue
+                
+                self._log(f"   ❌ Error crítico subiendo a Gemini: {e}")
+                raise e
+        
+        raise last_exception
+
+    def _get_file_with_retry(self, file_name: str, max_retries: int = 5, initial_delay: float = 2.0):
+        """Obtiene el estado de un archivo en Gemini con reintentos para fallas de red."""
+        last_exception = None
+        delay = initial_delay
+        attempt = 0
+        
+        while attempt < max_retries:
+            self._wait_for_connection(reason="verificación de archivo multimodal")
+            
+            try:
+                return genai.get_file(file_name)
+            except Exception as e:
+                last_exception = e
+                error_str = str(e).lower()
+                
+                is_connection_error = any(msg in error_str for msg in [
+                    "connection", "10054", "reset", "broken pipe", "timeout", "network", "dns", "unreachable", "host", "read operation timed out"
+                ])
+                
+                if is_connection_error:
+                    if not self._check_internet_connection():
+                        self._wait_for_connection(reason="reintento de verificación tras desconexión")
+                        delay = initial_delay
+                        continue
+                    
+                    remaining = max_retries - attempt - 1
+                    if remaining > 0:
+                        self._log(f"   ⚠️ Error de conexión/lectura al verificar ({e}). Reintentando en {delay}s... ({remaining} intentos restantes)")
+                        time.sleep(delay)
+                        delay *= 2
+                        attempt += 1
+                        continue
+                
+                self._log(f"   ❌ Error crítico verificando archivo en Gemini: {e}")
+                raise e
+        
+        raise last_exception
+
     def generate_raw_response(self, prompt: str, api_index: int = 1, files: List[Any] = None, temperature: Optional[float] = None) -> str:
         """
         Llamada robusta a Gemini con failover automático entre modelos y llaves.
@@ -145,28 +246,46 @@ class GeminiFlashcardGenerator:
                 available_keys = self.api_keys
 
             for key in available_keys:
-                try:
-                    genai.configure(api_key=key)
-                    model = genai.GenerativeModel(model_name)
+                while True:
+                    # Nos aseguramos de tener internet antes de intentar la llamada
+                    self._wait_for_connection(reason=f"generar respuesta con {model_name}")
                     
-                    content = [prompt]
-                    if files: content.extend(files)
-                    
-                    config_dict = {}
-                    if temperature is not None:
-                        config_dict["temperature"] = temperature
+                    try:
+                        genai.configure(api_key=key)
+                        model = genai.GenerativeModel(model_name)
                         
-                    response = model.generate_content(content, generation_config=config_dict if config_dict else None)
-                    return response.text
-                except Exception as e:
-                    err_msg = str(e)
-                    if "429" in err_msg or "quota" in err_msg.lower():
-                        self._log(f"⚠️ Cuota agotada para llave (...{key[-4:]}) con modelo {model_name}. Rotando...")
-                        self.exhausted_keys.add(key)
-                    else:
-                        self._log(f"❌ Error con modelo {model_name}: {err_msg}")
-                        errors.append(f"{model_name}: {err_msg}")
-                    continue # Probar siguiente llave/modelo
+                        content = [prompt]
+                        if files: content.extend(files)
+                        
+                        config_dict = {}
+                        if temperature is not None:
+                            config_dict["temperature"] = temperature
+                            
+                        response = model.generate_content(content, generation_config=config_dict if config_dict else None)
+                        return response.text
+                    except Exception as e:
+                        err_msg = str(e)
+                        err_msg_lower = err_msg.lower()
+                        
+                        # Detectar problemas de conexión a internet
+                        is_connection_error = any(msg in err_msg_lower for msg in [
+                            "connection", "10054", "reset", "broken pipe", "timeout", "network", "dns", "unreachable", "host"
+                        ])
+                        
+                        if is_connection_error:
+                            if not self._check_internet_connection():
+                                self._log(f"⚠️ Error de conexión de red durante llamada a Gemini: {err_msg}. Esperando reconexión...")
+                                self._wait_for_connection(reason="reintento de llamada tras desconexión")
+                                self._log("🔄 Reintentando llamada con el mismo modelo y llave...")
+                                continue  # Reintentar en el bucle True
+                        
+                        if "429" in err_msg or "quota" in err_msg_lower:
+                            self._log(f"⚠️ Cuota agotada para llave (...{key[-4:]}) con modelo {model_name}. Rotando...")
+                            self.exhausted_keys.add(key)
+                        else:
+                            self._log(f"❌ Error con modelo {model_name}: {err_msg}")
+                            errors.append(f"{model_name}: {err_msg}")
+                        break  # Salir del bucle de reintento para rotar a la siguiente llave/modelo
 
         raise Exception(f"No se pudo obtener respuesta de Gemini tras agotar el pool: {'; '.join(errors)}")
 
@@ -500,10 +619,10 @@ class GeminiFlashcardGenerator:
                 uploaded_files = []
                 for vp in video_paths:
                     if not os.path.exists(vp): continue
-                    f = genai.upload_file(vp)
+                    f = self._upload_file_with_retry(vp)
                     while f.state.name == "PROCESSING": 
                         time.sleep(5)
-                        f = genai.get_file(f.name)
+                        f = self._get_file_with_retry(f.name)
                     uploaded_files.append(f)
 
                 if not uploaded_files:
@@ -539,7 +658,11 @@ class GeminiFlashcardGenerator:
                         all_cards_for_qyi.extend(flashcards)
 
                 # Cleanup
-                for f in uploaded_files: f.delete()
+                for f in uploaded_files:
+                    try:
+                        f.delete()
+                    except Exception as cleanup_err:
+                        self._log(f"⚠️ Advertencia: No se pudo eliminar el archivo subido {f.name}: {cleanup_err}")
 
                 # QYI (desactivado en medio de la generación para evitar bloqueos)
                 # self.run_qyi_evaluation(f"Multimodal Video Context: {section_title}", all_cards_for_qyi)
